@@ -1,0 +1,36 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "dev.henny.rocketload.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [
+    "ZipBackedFactoryMixin",
+    "FileResourcePackProviderMixin",
+    "ResourcePackManagerMixin"
+  ],
+  "client": [
+    "AtlasManagerCompletableEntryInvoker",
+    "AtlasManagerMixin",
+    "AtlasManagerStitchAccessor",
+    "AtlasManagerStitchMixin",
+    "BakedModelManagerMixin",
+    "FontManagerMixin",
+    "LanguageManagerMixin",
+    "MinecraftClientMixin",
+    "PackScreenMixin",
+    "ParticleSpriteManagerMixin",
+    "SinglePreparationResourceReloaderMixin",
+    "SplashOverlayAccessor",
+    "SpriteAtlasTextureAccessor",
+    "SpriteAtlasTextureMixin",
+    "SpriteContentsMixin",
+    "TextureManagerMixin",
+    "WorldRendererAccessor"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  },
+  "overwrites": {
+    "requireAnnotations": true
+  }
+}

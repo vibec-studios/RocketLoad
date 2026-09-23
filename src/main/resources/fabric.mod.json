@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "id": "rocketload",
+  "version": "${version}",
+  "name": "RocketLoad",
+  "description": "Loads your resourcepacks like a rocketship.",
+  "authors": [],
+  "contact": {},
+  "license": "MIT",
+  "icon": "assets/rocketload/icon.png",
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      "dev.henny.rocketload.client.RocketloadClient"
+    ],
+    "main": [
+      "dev.henny.rocketload.Rocketload"
+    ]
+  },
+  "mixins": [
+    "rocketload.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=${loader_version}",
+    "fabric-language-kotlin": ">=${kotlin_loader_version}",
+    "fabric-api": "*",
+    "minecraft": "${minecraft_version}"
+  }
+}

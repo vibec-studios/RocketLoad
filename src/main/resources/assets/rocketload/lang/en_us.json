@@ -1,0 +1,10 @@
+{
+  "rocketload.toast.title": "RocketLoad",
+  "rocketload.toast.applying": "Applying resource packs… %s%%",
+  "rocketload.toast.done": "Applied in %s ms",
+  "rocketload.toast.optimized": "%s pack(s) optimized",
+  "rocketload.toast.optimize_progress": "Optimizing %s/%s",
+  "rocketload.pack.optimize": "Optimize",
+  "rocketload.pack.optimize_tooltip": "Convert all texture packs to .rocketfuel",
+  "rocketload.pack.optimizing": "Optimizing packs…"
+}
