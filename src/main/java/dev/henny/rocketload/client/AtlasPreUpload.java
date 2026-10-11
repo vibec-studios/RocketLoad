@@ -26,7 +26,7 @@ import com.mojang.blaze3d.textures.TextureFormat;
 *///?}
 
 public final class AtlasPreUpload {
-    private static final long BUDGET_NANOS = 3_000_000L;
+    private static final long MIN_SLICE_NANOS = 1_000_000L;
 
     private static final Map<String, GpuTexture> READY = new HashMap<>();
     private static final Set<GpuTexture> PREPARED = Collections.newSetFromMap(new IdentityHashMap<>());
@@ -68,7 +68,7 @@ public final class AtlasPreUpload {
 
     private static void pump(Job job, CompletableFuture<Job> future) {
         try {
-            long deadline = System.nanoTime() + BUDGET_NANOS;
+            long deadline = Math.max(BackgroundReloadDriver.frameDeadline(), System.nanoTime() + MIN_SLICE_NANOS);
             GpuDevice device = RenderSystem.getDevice();
             while (job.index < job.sprites.size() && System.nanoTime() < deadline) {
                 TextureAtlasSprite sprite = job.sprites.get(job.index++);

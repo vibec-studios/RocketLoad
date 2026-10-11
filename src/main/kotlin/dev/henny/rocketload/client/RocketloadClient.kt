@@ -64,6 +64,8 @@ class RocketloadClient : ClientModInitializer {
         }
     }
 
+    private fun testPackName(): String = System.getenv("ROCKETLOAD_TEST_PACK") ?: "rockettest.zip"
+
     private fun runTestSequence(mc: Minecraft, packDir: java.nio.file.Path) {
         val logger = LoggerFactory.getLogger("RocketLoad")
         logger.info("[RocketLoad] Testmodus: Reload 1 (unveraendert, Skip-Pfad)")
@@ -72,13 +74,13 @@ class RocketloadClient : ClientModInitializer {
             logger.info("[RocketLoad] Testmodus: Reload 1 fertig nach {} ms", (System.nanoTime() - start) / 1_000_000)
             mc.execute {
                 try {
-                    val testPack = packDir.resolve("rockettest.zip")
+                    val testPack = packDir.resolve(testPackName())
                     if (Files.exists(testPack)) Files.setLastModifiedTime(testPack, FileTime.fromMillis(System.currentTimeMillis()))
                 } catch (e: Exception) {
                     logger.warn("[RocketLoad] Testmodus: Pack nicht anfassbar: {}", e.toString())
                 }
                 mc.resourcePackRepository.reload()
-                val added = mc.resourcePackRepository.addPack("file/rockettest.zip")
+                val added = mc.resourcePackRepository.addPack("file/${testPackName()}")
                 val start2 = System.nanoTime()
                 logger.info("[RocketLoad] Testmodus: Reload 2 + 3 gleichzeitig (Folge-Reload-Test, Pack aktiviert: {})", added)
                 val second = mc.reloadResourcePacks()

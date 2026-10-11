@@ -56,7 +56,7 @@ Nach dem Reload prüft RocketLoad, ob Block-Geometrie (`models/`, `blockstates/`
 | Option | Default | Bedeutung |
 |---|---|---|
 | `backgroundReload` | `true` | Reloads ohne Splash-Screen im Hintergrund |
-| `applyBudgetMsPerTick` | `3` | Max. Millisekunden Apply-Arbeit pro Frame (0 = Vanilla-Verhalten) |
+| `applyBudgetMsPerTick` | `3` | Start-Budget für Apply-Arbeit pro Frame in ms (0 = Vanilla-Verhalten). Dauert ein Reload länger als 1,5 s, verdoppelt sich das Budget jede Sekunde bis 40 ms; ohne Fensterfokus gilt praktisch kein Limit |
 | `spreadAtlasUpload` | `true` | Atlas-Texturen über mehrere Frames vorab hochladen |
 | `toasts` | `true` | Fortschritts-/Abschluss-Toasts |
 | `chunkRebuildGuard` | `true` | Chunk-Rebuild nur bei echter Änderung |

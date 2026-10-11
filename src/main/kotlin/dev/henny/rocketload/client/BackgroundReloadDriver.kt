@@ -20,6 +20,10 @@ object BackgroundReloadDriver {
     private val logger = LoggerFactory.getLogger("RocketLoad")
 
     private val TOAST_ID = SystemToast.SystemToastId(5000L)
+    private const val RAMP_START_MS = 1500L
+    private const val RAMP_END_MS = 6000L
+    private const val MAX_BUDGET_NANOS = 40_000_000L
+    private const val UNFOCUSED_BUDGET_NANOS = 250_000_000L
 
     private class ActiveReload(val reload: ReloadInstance, val startNanos: Long)
 
@@ -38,6 +42,23 @@ object BackgroundReloadDriver {
 
     @Volatile
     private var pumping = false
+
+    @Volatile
+    private var frameDeadline = 0L
+
+    @JvmStatic
+    fun frameDeadline(): Long = frameDeadline
+
+    private fun budgetNanos(mc: Minecraft?): Long {
+        val base = RocketLoadConfig.instance.applyBudgetMsPerTick.coerceIn(1, 50) * 1_000_000L
+        if (mc != null && !mc.isWindowActive) return UNFOCUSED_BUDGET_NANOS
+        val state = active ?: return base
+        val elapsedMs = (System.nanoTime() - state.startNanos) / 1_000_000
+        if (elapsedMs < RAMP_START_MS) return base
+        if (elapsedMs > RAMP_END_MS) return MAX_BUDGET_NANOS
+        val factor = Math.pow(2.0, (elapsedMs - RAMP_START_MS) / 1000.0)
+        return (base * factor).toLong().coerceAtMost(MAX_BUDGET_NANOS)
+    }
 
     private var deferredStart: CompletableFuture<Void>? = null
     private var followUp: CompletableFuture<Void>? = null
@@ -144,8 +165,8 @@ object BackgroundReloadDriver {
         val pumpStart = System.nanoTime()
         var ran = 0
         try {
-            val budgetMs = RocketLoadConfig.instance.applyBudgetMsPerTick.coerceIn(1, 50)
-            val deadline = pumpStart + budgetMs * 1_000_000L
+            val deadline = pumpStart + budgetNanos(Minecraft.getInstance())
+            frameDeadline = deadline
             while (true) {
                 val task = applyQueue.poll() ?: break
                 try {
