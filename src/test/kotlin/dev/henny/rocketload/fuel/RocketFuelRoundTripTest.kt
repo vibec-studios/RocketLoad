@@ -107,6 +107,34 @@ class RocketFuelRoundTripTest {
             assertTrue(fuel.domains.unknown)
             assertTrue(fuel.domains.visuals)
             assertFalse(fuel.domains.sounds)
+            assertFalse(fuel.domains.opaque)
+        }
+    }
+
+    @Test
+    fun overlaysAndFiltersMarkPackOpaque() {
+        val overlay = zip(
+            mapOf(
+                "pack.mcmeta" to """{ "pack": { "pack_format": 75, "description": "o" } }""".toByteArray(),
+                "overlay_1/assets/minecraft/lang/en_us.json" to "{}".toByteArray(),
+            )
+        )
+        val overlayFuel = dir.resolve("overlay.rocketfuel")
+        RocketFuelWriter.convert(overlay, overlayFuel)
+        RocketFuelFile.open(overlayFuel).use { assertTrue(it.domains.opaque) }
+
+        val filtered = zip(
+            mapOf(
+                "pack.mcmeta" to """{ "pack": { "pack_format": 75, "description": "f" }, "filter": { "block": [] } }""".toByteArray(),
+                "assets/minecraft/textures/environment/sun.png" to texture,
+                "pack.png" to png(8, 8, 3),
+            )
+        )
+        val filteredFuel = dir.resolve("filtered.rocketfuel")
+        RocketFuelWriter.convert(filtered, filteredFuel)
+        RocketFuelFile.open(filteredFuel).use {
+            assertTrue(it.domains.opaque)
+            assertTrue(it.domains.textures)
         }
     }
 

@@ -35,11 +35,16 @@ object ResourceFingerprints {
         return "fuel ${fuel.path.fileName} entries=${fuel.entries.size} tex=${d.textures} models=${d.models} atlases=${d.atlases} geo=${d.geometry} unknown=${d.unknown}"
     }
 
-    fun fingerprint(packs: List<Any>, relevant: (RocketFuelFile.Domains) -> Boolean): List<String> =
+    fun fingerprint(
+        packs: List<Any>,
+        relevant: (RocketFuelFile.Domains) -> Boolean,
+        includeOpaque: Boolean = false,
+    ): List<String> =
         packs.mapNotNull { pack ->
             val fuel = fuelOf(pack)
             if (fuel != null) {
-                if (relevant(fuel.domains)) "fuel:${fuel.path.fileName}:${fuel.sourceSize}:${fuel.sourceMtime}" else null
+                val counts = relevant(fuel.domains) || (includeOpaque && fuel.domains.opaque)
+                if (counts) "fuel:${fuel.path.fileName}:${fuel.sourceSize}:${fuel.sourceMtime}" else null
             } else {
                 token(pack)
             }

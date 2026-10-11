@@ -1,5 +1,6 @@
 package dev.henny.rocketload.api.impl
 
+import dev.henny.rocketload.RocketLoadConfig
 import dev.henny.rocketload.api.EntryFilter
 import dev.henny.rocketload.api.PackArchive
 import dev.henny.rocketload.api.PackBuilder
@@ -104,6 +105,15 @@ object RocketLoadApiImpl : RocketLoadApi {
 
     override fun removeListener(listener: RocketLoadListener) {
         listeners.remove(listener)
+    }
+
+    override fun selectivePackSetReload(): Boolean = RocketLoadConfig.instance.selectivePackSetReload
+
+    override fun setSelectivePackSetReload(enabled: Boolean) {
+        val config = RocketLoadConfig.instance
+        if (config.selectivePackSetReload == enabled) return
+        config.selectivePackSetReload = enabled
+        RocketLoadConfig.save()
     }
 
     override fun addSkipVeto(veto: SkipVeto) {

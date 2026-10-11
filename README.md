@@ -44,6 +44,8 @@ Vanilla lädt bei jedem Reload *alle* Listener neu. RocketLoad überspringt die,
 
 Atlanten, Modelle und Partikel werden **immer gemeinsam** entschieden (Vanilla koppelt sie über `AtlasManager.PENDING_STITCH`, getrennte Entscheidungen würden den Reload für immer hängen lassen).
 
+Ändert sich die Liste der aktiven Packs, zählt nur, ob ein Pack, das den jeweiligen Bereich betrifft, dazukam, wegfiel oder verschoben wurde (abschaltbar über `selectivePackSetReload`).
+
 Konservativ: Ordner-Packs gelten immer als geändert, unbekannte Asset-Ordner (z. B. `optifine/` für Continuity/CIT) zählen als visuell relevant, unbekannte Listener anderer Mods laufen immer.
 
 ### 🧱 Kein unnötiger Chunk-Rebuild
@@ -61,6 +63,7 @@ Nach dem Reload prüft RocketLoad, ob Block-Geometrie (`models/`, `blockstates/`
 | `toasts` | `true` | Fortschritts-/Abschluss-Toasts |
 | `chunkRebuildGuard` | `true` | Chunk-Rebuild nur bei echter Änderung |
 | `selectiveReload` | `true` | Unveränderte Listener überspringen |
+| `selectivePackSetReload` | `true` | Auch beim Aktivieren/Deaktivieren von Packs nur die betroffenen Bereiche neu laden (und keinen Chunk-Rebuild, wenn Geometrie und Block-Atlas gleich bleiben). Packs mit Overlays oder `filter` zählen dabei immer als betroffen. Aus = altes Verhalten (voller Reload) |
 | `optimizeTextures` | `true` | PNGs beim Konvertieren optimieren |
 | `pngCompressionLevel` | `6` | Deflate-Stufe 1–9 für PNGs (siehe Benchmark) |
 | `warmupConversion` | `true` | Packs beim Start vorkonvertieren |
@@ -112,6 +115,7 @@ try (PackArchive pack = api.open(Path.of("resourcepacks/Faithful.zip"))) {
 | **Cache** | `convert(zip)` (async), `cacheDirectory()` |
 | **Spielzustand** | `availablePacks()`, `activePackIds()`, `packFile(id)`, `reloadStatus()`, `requestReload()` |
 | **Events** | `addListener(RocketLoadListener)`: Reload gestartet/fertig, Skip-Entscheidungen, Pack konvertiert |
+| **Einstellungen** | `selectivePackSetReload()` / `setSelectivePackSetReload(bool)` (API 2) – ändert `config/rocketload.json` |
 | **Kompatibilität** | `addSkipVeto(domain -> ...)`: Mods können erzwingen, dass ein Bereich (z. B. `VISUALS`) neu geladen wird |
 
 ## Entwicklung

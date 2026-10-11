@@ -8,7 +8,7 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 
 public interface RocketLoadApi {
-    int API_VERSION = 1;
+    int API_VERSION = 2;
 
     static RocketLoadApi get() {
         return RocketLoadApiImpl.INSTANCE;
@@ -47,6 +47,22 @@ public interface RocketLoadApi {
     void addListener(RocketLoadListener listener);
 
     void removeListener(RocketLoadListener listener);
+
+    /**
+     * Whether a changed set of active packs only reloads the affected domains instead of
+     * everything (config option {@code selectivePackSetReload}).
+     *
+     * @since API 2
+     */
+    boolean selectivePackSetReload();
+
+    /**
+     * Changes {@code selectivePackSetReload} and saves {@code config/rocketload.json}.
+     * Takes effect with the next reload.
+     *
+     * @since API 2
+     */
+    void setSelectivePackSetReload(boolean enabled);
 
     void addSkipVeto(SkipVeto veto);
 

@@ -34,6 +34,8 @@ class RocketFuelFile private constructor(
         val atlases: Boolean,
         val particles: Boolean,
         val unknown: Boolean,
+        /** Overlays or a pack.mcmeta filter: path-based domain detection can't see their effect. */
+        val opaque: Boolean = false,
     ) {
         val visuals: Boolean get() = textures || models || atlases || particles || unknown
         val geometry: Boolean get() = blockModels || colormaps || unknown
@@ -166,9 +168,13 @@ class RocketFuelFile private constructor(
             var atlases = false
             var particles = false
             var unknown = false
+            var opaque = false
 
             fun note(path: String) {
-                if (!path.startsWith("assets/")) return
+                if (!path.startsWith("assets/")) {
+                    if (path.indexOf('/') > 0 && !path.startsWith("data/")) opaque = true
+                    return
+                }
                 val nsEnd = path.indexOf('/', "assets/".length)
                 if (nsEnd < 0) return
                 val dirEnd = path.indexOf('/', nsEnd + 1)
@@ -198,7 +204,7 @@ class RocketFuelFile private constructor(
 
             fun build() = Domains(
                 sounds, texts, colormaps, lang, fonts, shaders,
-                textures, models, blockModels, atlases, particles, unknown,
+                textures, models, blockModels, atlases, particles, unknown, opaque,
             )
         }
 
@@ -239,6 +245,13 @@ class RocketFuelFile private constructor(
                     entries[entryPath] = Entry(offset, entrySize)
                     domains.note(entryPath)
                 }
+                entries["pack.mcmeta"]?.let { meta ->
+                    if (meta.size in 1..MAX_META_SCAN) {
+                        val metaBuf = ByteBuffer.allocate(meta.size)
+                        readFully(channel, metaBuf, meta.offset, path)
+                        if (String(metaBuf.array(), Charsets.UTF_8).contains("\"filter\"")) domains.opaque = true
+                    }
+                }
 
                 return RocketFuelFile(
                     path, channel, entries,
@@ -250,6 +263,8 @@ class RocketFuelFile private constructor(
                 throw t
             }
         }
+
+        private const val MAX_META_SCAN = 256 * 1024
 
         private fun readFully(channel: FileChannel, buf: ByteBuffer, start: Long, path: Path) {
             var pos = start

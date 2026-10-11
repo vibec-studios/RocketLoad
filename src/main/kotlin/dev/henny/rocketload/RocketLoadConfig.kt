@@ -13,6 +13,7 @@ class RocketLoadConfig {
     var toasts: Boolean = true
     var chunkRebuildGuard: Boolean = true
     var selectiveReload: Boolean = true
+    var selectivePackSetReload: Boolean = true
     var optimizeTextures: Boolean = true
     var pngCompressionLevel: Int = 6
     var warmupConversion: Boolean = true
@@ -46,13 +47,24 @@ class RocketLoadConfig {
             }
             config.applyBudgetMsPerTick = config.applyBudgetMsPerTick.coerceIn(0, 50)
             config.pngCompressionLevel = config.pngCompressionLevel.coerceIn(1, 9)
+            write(config)
+            return config
+        }
+
+        /** Writes the current values back to config/rocketload.json. */
+        @JvmStatic
+        @Synchronized
+        fun save() {
+            write(instance)
+        }
+
+        private fun write(config: RocketLoadConfig) {
             try {
                 Files.createDirectories(path.parent)
                 Files.newBufferedWriter(path).use { gson.toJson(config, it) }
             } catch (e: Exception) {
                 logger.warn("[RocketLoad] Config nicht schreibbar: {}", e.toString())
             }
-            return config
         }
     }
 }

@@ -42,7 +42,8 @@ object ChunkRebuildGuard {
         val blocks = AtlasLayouts.blocksLayout(mc)
         val sameBlocks = lastBlocks != null && blocks != null && lastBlocks == blocks
         lastBlocks = blocks
-        if (!RocketLoadConfig.instance.chunkRebuildGuard || ReloadSkips.packSetChanged()) {
+        val config = RocketLoadConfig.instance
+        if (!config.chunkRebuildGuard || (ReloadSkips.packSetChanged() && !config.selectivePackSetReload)) {
             full(mc, "Pack-Set geaendert oder Guard aus")
             return
         }
