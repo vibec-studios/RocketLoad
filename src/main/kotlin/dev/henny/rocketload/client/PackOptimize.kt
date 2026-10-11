@@ -1,17 +1,18 @@
 package dev.henny.rocketload.client
 
-import net.minecraft.client.MinecraftClient
-import net.minecraft.client.toast.SystemToast
-import net.minecraft.text.Text
+import dev.henny.rocketload.fuel.RocketFuelCache
+import net.minecraft.client.Minecraft
+import net.minecraft.client.gui.components.toasts.SystemToast
+import net.minecraft.network.chat.Component
 import org.slf4j.LoggerFactory
 import java.nio.file.Path
 
 object PackOptimize {
     private val logger = LoggerFactory.getLogger("RocketLoad")
+    private val TOAST_ID = SystemToast.SystemToastId(4000L)
 
     @Volatile
-    var running = false
-        private set
+    private var running = false
 
     @JvmStatic
     fun isRunning(): Boolean = running
@@ -20,28 +21,20 @@ object PackOptimize {
     fun start(packsDir: Path) {
         if (running) return
         running = true
-        toast(Text.translatable("rocketload.pack.optimizing"))
-        val client = MinecraftClient.getInstance()
-        dev.henny.rocketload.fuel.RocketFuelCache.optimizeAll(packsDir, { done, total ->
-            client?.execute {
-                toast(Text.translatable("rocketload.toast.optimize_progress", done, total))
-            }
+        toast(Component.translatable("rocketload.pack.optimizing"))
+        val mc = Minecraft.getInstance()
+        RocketFuelCache.optimizeAll(packsDir, { done, total ->
+            mc?.execute { toast(Component.translatable("rocketload.toast.optimize_progress", done, total)) }
         }, { converted, ms ->
             running = false
             logger.info("[RocketLoad] Optimiert: {} Pack(s) in {} ms", converted, ms)
-            client?.execute {
-                toast(Text.translatable("rocketload.toast.optimized", converted))
-            }
+            mc?.execute { toast(Component.translatable("rocketload.toast.optimized", converted)) }
         })
     }
 
-    private fun toast(body: Text) {
-        val client = MinecraftClient.getInstance() ?: return
-        SystemToast.show(
-            client.toastManager,
-            SystemToast.Type(4000L),
-            Text.translatable("rocketload.toast.title"),
-            body,
-        )
+    @JvmStatic
+    fun toast(body: Component) {
+        val mc = Minecraft.getInstance() ?: return
+        SystemToast.addOrUpdate(McCompat.toastManager(mc), TOAST_ID, Component.translatable("rocketload.toast.title"), body)
     }
 }

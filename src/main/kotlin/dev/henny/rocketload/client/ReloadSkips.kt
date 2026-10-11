@@ -1,200 +1,137 @@
 package dev.henny.rocketload.client
 
 import dev.henny.rocketload.RocketLoadConfig
+import dev.henny.rocketload.api.ReloadDomain
+import dev.henny.rocketload.api.impl.RocketLoadApiImpl
 import dev.henny.rocketload.fuel.RocketFuelFile
-import net.minecraft.client.MinecraftClient
-import net.minecraft.client.gl.ShaderLoader
-import net.minecraft.client.resource.DryFoliageColormapResourceSupplier
-import net.minecraft.client.resource.FoliageColormapResourceSupplier
-import net.minecraft.client.resource.GrassColormapResourceSupplier
-import net.minecraft.client.resource.SplashTextResourceSupplier
-import net.minecraft.client.sound.SoundManager
-import net.minecraft.resource.ResourceManager
-import net.minecraft.resource.ResourceReloader
+import net.minecraft.client.Minecraft
+import net.minecraft.client.renderer.ShaderManager
+import net.minecraft.client.resources.DryFoliageColorReloadListener
+import net.minecraft.client.resources.FoliageColorReloadListener
+import net.minecraft.client.resources.GrassColorReloadListener
+import net.minecraft.client.resources.SplashManager
+import net.minecraft.client.sounds.SoundManager
+import net.minecraft.server.packs.resources.ResourceManager
 import org.slf4j.LoggerFactory
 import java.util.concurrent.ConcurrentHashMap
 
 object ReloadSkips {
     private val logger = LoggerFactory.getLogger("RocketLoad")
 
-    class Domain(
-        val label: String,
-        val relevant: (RocketFuelFile) -> Boolean,
+    private class Domain(
+        val id: ReloadDomain,
+        val relevant: (RocketFuelFile.Domains) -> Boolean,
         val extraState: () -> String = { "" },
     )
 
-    private val SOUNDS = Domain("Sounds", ResourceFingerprints::touchesSounds)
-    private val SPLASHES = Domain("Splash-Texte", ResourceFingerprints::touchesTexts)
-    private val COLORMAPS = Domain("Colormaps", ResourceFingerprints::touchesColormaps)
-    private val LANGUAGE = Domain(
-        "Sprache",
-        ResourceFingerprints::touchesLang,
-        { MinecraftClient.getInstance()?.languageManager?.language ?: "" },
-    )
-    private val FONTS = Domain("Fonts", ResourceFingerprints::touchesFonts)
-    private val SHADERS = Domain("Shader", ResourceFingerprints::touchesShaders)
-    private val TEXTURES = Domain("Texturen", ResourceFingerprints::touchesTextures)
-    private val ATLAS = Domain(
-        "Atlanten",
-        ResourceFingerprints::touchesAtlas,
-        { MinecraftClient.getInstance()?.options?.mipmapLevels?.value?.toString() ?: "" },
-    )
-    private val MODELS = Domain(
-        "Modelle",
-        ResourceFingerprints::touchesModels,
-        { MinecraftClient.getInstance()?.options?.mipmapLevels?.value?.toString() ?: "" },
-    )
+    private fun mipmaps(): String = Minecraft.getInstance()?.options?.mipmapLevels()?.get()?.toString() ?: ""
+
+    private val SOUNDS = Domain(ReloadDomain.SOUNDS, { it.sounds })
+    private val SPLASHES = Domain(ReloadDomain.SPLASH_TEXTS, { it.texts })
+    private val COLORMAPS = Domain(ReloadDomain.COLORMAPS, { it.colormaps })
+    private val LANGUAGE = Domain(ReloadDomain.LANGUAGE, { it.lang }, { Minecraft.getInstance()?.languageManager?.selected ?: "" })
+    private val FONTS = Domain(ReloadDomain.FONTS, { it.fonts })
+    private val SHADERS = Domain(ReloadDomain.SHADERS, { it.shaders })
+    private val TEXTURES = Domain(ReloadDomain.TEXTURES, { it.textures })
+    private val VISUALS = Domain(ReloadDomain.VISUALS, { it.visuals }, ::mipmaps)
+    private val GEOMETRY = Domain(ReloadDomain.GEOMETRY, { it.geometry })
+
+    private val ALL = listOf(SOUNDS, SPLASHES, COLORMAPS, LANGUAGE, FONTS, SHADERS, TEXTURES, VISUALS, GEOMETRY)
 
     private fun domainForSimpleListener(listener: Any): Domain? = when (listener) {
         is SoundManager -> SOUNDS
-        is SplashTextResourceSupplier -> SPLASHES
-        is GrassColormapResourceSupplier, is FoliageColormapResourceSupplier,
-        is DryFoliageColormapResourceSupplier -> COLORMAPS
-        is ShaderLoader -> SHADERS
+        is SplashManager -> SPLASHES
+        is GrassColorReloadListener, is FoliageColorReloadListener, is DryFoliageColorReloadListener -> COLORMAPS
+        is ShaderManager -> SHADERS
         else -> null
     }
 
-    private val lastFingerprints = ConcurrentHashMap<String, List<String>>()
-    private val skipMemo = ConcurrentHashMap<String, Boolean>()
+    private val lastFingerprints = ConcurrentHashMap<ReloadDomain, List<String>>()
+    private val decisions = ConcurrentHashMap<ReloadDomain, Boolean>()
 
-    @Volatile
-    private var lastBlocksLayout: String? = null
-
-    private var lastEnabledIds: List<String>? = null
+    private var lastSelectedIds: List<String>? = null
 
     @Volatile
     private var packSetChanged = false
-
-    @Volatile
-    private var skippedModels = false
 
     @JvmStatic
     fun packSetChanged(): Boolean = packSetChanged
 
     @JvmStatic
-    fun skippedModels(): Boolean = skippedModels
+    fun decision(domain: ReloadDomain): Boolean? = decisions[domain]
 
     @JvmStatic
     fun beginReload() {
-        skipMemo.clear()
-        SpritePixels.beginReload()
+        decisions.clear()
         ReloadDebug.beginReload()
-        skippedModels = false
-        val ids = MinecraftClient.getInstance()?.resourcePackManager?.enabledIds?.toList()
-        packSetChanged = lastEnabledIds != null && lastEnabledIds != ids
-        lastEnabledIds = ids
-        if (packSetChanged) {
-            logger.info("[RocketLoad] Aktivierte Packs haben sich geaendert - voller Visual-Reload")
-        }
+        val ids = Minecraft.getInstance()?.resourcePackRepository?.selectedIds?.toList()
+        packSetChanged = lastSelectedIds != null && lastSelectedIds != ids
+        lastSelectedIds = ids
+        if (packSetChanged) logger.info("[RocketLoad] Aktivierte Packs haben sich geaendert - voller Reload")
     }
 
     @JvmStatic
     fun capture(manager: ResourceManager) {
-        remember("LanguageManager", LANGUAGE, manager)
-        remember("FontManager", FONTS, manager)
-        remember("TextureManager", TEXTURES, manager)
-        remember("Atlas", ATLAS, manager)
-        remember("Models", MODELS, manager)
-        remember("Visuals", ATLAS, manager)
-        remember(SoundManager::class.java.name, SOUNDS, manager)
-        remember(SplashTextResourceSupplier::class.java.name, SPLASHES, manager)
-        remember(GrassColormapResourceSupplier::class.java.name, COLORMAPS, manager)
-        remember(FoliageColormapResourceSupplier::class.java.name, COLORMAPS, manager)
-        remember(DryFoliageColormapResourceSupplier::class.java.name, COLORMAPS, manager)
-        remember(ShaderLoader::class.java.name, SHADERS, manager)
-    }
-
-    fun rememberBlocksLayout(signature: String?) {
-        if (signature != null) lastBlocksLayout = signature
-    }
-
-    private fun remember(key: String, domain: Domain, manager: ResourceManager) {
-        try {
-            lastFingerprints[key] = ResourceFingerprints.fingerprint(
-                manager.streamResourcePacks().toList(),
-                domain.relevant,
-            ) + domain.extraState()
-        } catch (_: Exception) {
+        val packs = manager.listPacks().toList()
+        for (domain in ALL) {
+            try {
+                lastFingerprints[domain.id] = ResourceFingerprints.fingerprint(packs, domain.relevant) + domain.extraState()
+            } catch (_: Exception) {
+            }
         }
+        if (lastSelectedIds == null) lastSelectedIds = Minecraft.getInstance()?.resourcePackRepository?.selectedIds?.toList()
     }
 
     @JvmStatic
     fun shouldSkipSimpleListener(listener: Any, manager: ResourceManager): Boolean {
         val domain = domainForSimpleListener(listener) ?: return false
-        return shouldSkip(listener.javaClass.name, domain, manager)
+        return shouldSkip(domain, manager)
     }
 
     @JvmStatic
-    fun shouldSkipLanguageReload(manager: ResourceManager): Boolean =
-        shouldSkip("LanguageManager", LANGUAGE, manager)
+    fun shouldSkipLanguage(manager: ResourceManager): Boolean = shouldSkip(LANGUAGE, manager)
 
     @JvmStatic
-    fun shouldSkipFontReload(manager: ResourceManager): Boolean =
-        shouldSkip("FontManager", FONTS, manager)
+    fun shouldSkipFonts(manager: ResourceManager): Boolean = shouldSkip(FONTS, manager)
 
     @JvmStatic
-    fun shouldSkipTextureReload(manager: ResourceManager): Boolean =
-        shouldSkip("TextureManager", TEXTURES, manager)
+    fun shouldSkipTextures(manager: ResourceManager): Boolean = shouldSkip(TEXTURES, manager)
 
     @JvmStatic
-    fun shouldSkipVisualReload(reloadKey: Any, manager: ResourceManager): Boolean =
-        shouldSkipAtlasReload(manager)
+    fun shouldSkipShaders(manager: ResourceManager): Boolean = shouldSkip(SHADERS, manager)
 
     @JvmStatic
-    fun shouldSkipAtlasReload(manager: ResourceManager): Boolean {
-        if (packSetChanged) return false
-        return shouldSkip("Atlas", ATLAS, manager)
+    fun shouldSkipVisuals(manager: ResourceManager): Boolean = shouldSkip(VISUALS, manager)
+
+    @JvmStatic
+    fun geometryUnchanged(manager: ResourceManager): Boolean {
+        decisions[GEOMETRY.id]?.let { return it }
+        val result = evaluate(GEOMETRY, manager)
+        decisions[GEOMETRY.id] = result
+        return result
     }
 
-    @JvmStatic
-    fun shouldSkipModelReload(store: ResourceReloader.Store, manager: ResourceManager): Boolean {
-        if (packSetChanged) {
-            skippedModels = false
-            return false
+    private fun shouldSkip(domain: Domain, manager: ResourceManager): Boolean {
+        decisions[domain.id]?.let { return it }
+        synchronized(this) {
+            decisions[domain.id]?.let { return it }
+            val skip = RocketLoadConfig.instance.selectiveReload && evaluate(domain, manager) && !RocketLoadApiImpl.vetoSkip(domain.id)
+            if (skip) logger.info("[RocketLoad] {} unveraendert - Reload uebersprungen", domain.id.label)
+            decisions[domain.id] = skip
+            RocketLoadApiImpl.fireSkipDecision(domain.id, skip)
+            return skip
         }
-        if (!shouldSkip("Models", MODELS, manager)) {
-            skippedModels = false
-            return false
-        }
-        if (shouldSkipAtlasReload(manager)) {
-            logger.info("[RocketLoad] Modelle unveraendert, Atlas unveraendert - Bake uebersprungen")
-            skippedModels = true
-            return true
-        }
-        val layoutStart = System.nanoTime()
-        val layout = AtlasLayouts.blocksLayoutStitch(store)
-        ReloadDebug.log("blocks UV-layout now={} last={} hashMs={}", layout, lastBlocksLayout, (System.nanoTime() - layoutStart) / 1_000_000)
-        if (layout == null) {
-            skippedModels = false
-            return false
-        }
-        val same = lastBlocksLayout != null && lastBlocksLayout == layout
-        lastBlocksLayout = layout
-        if (same) {
-            logger.info("[RocketLoad] Nur Pixel, Block-Atlas-UVs gleich - Model-Bake uebersprungen")
-        }
-        skippedModels = same
-        return same
     }
 
-    private fun shouldSkip(key: String, domain: Domain, manager: ResourceManager): Boolean {
-        if (packSetChanged) return false
-        if (!RocketLoadConfig.instance.selectiveReload) return false
-        skipMemo[key]?.let { return it }
+    private fun evaluate(domain: Domain, manager: ResourceManager): Boolean {
         return try {
-            val fingerprint = ResourceFingerprints.fingerprint(manager.streamResourcePacks().toList(), domain.relevant) +
-                domain.extraState()
-            val last = lastFingerprints.put(key, fingerprint)
-            val skip = last != null && last == fingerprint
-            ReloadDebug.skip(domain.label, skip, last, fingerprint)
-            if (skip) {
-                logger.info("[RocketLoad] {} unveraendert - Reload uebersprungen", domain.label)
-            }
-            skipMemo[key] = skip
-            skip
+            val fingerprint = ResourceFingerprints.fingerprint(manager.listPacks().toList(), domain.relevant) + domain.extraState()
+            val last = lastFingerprints.put(domain.id, fingerprint)
+            val same = !packSetChanged && last != null && last == fingerprint
+            ReloadDebug.skip(domain.id.label, same, last, fingerprint)
+            same
         } catch (e: Exception) {
-            logger.warn("[RocketLoad] Skip-Pruefung fuer {} fehlgeschlagen, Listener laeuft normal: {}", key, e.toString())
-            skipMemo[key] = false
+            logger.warn("[RocketLoad] Skip-Pruefung fuer {} fehlgeschlagen, Listener laeuft normal: {}", domain.id.label, e.toString())
             false
         }
     }

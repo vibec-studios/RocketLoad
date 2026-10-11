@@ -1,83 +1,73 @@
 package dev.henny.rocketload.client
 
-import dev.henny.rocketload.fuel.RocketFuelFile
-import net.minecraft.client.MinecraftClient
-import net.minecraft.client.render.WorldRenderer
-import net.minecraft.resource.ResourcePack
+import dev.henny.rocketload.RocketLoadConfig
+import dev.henny.rocketload.api.ReloadDomain
+import net.minecraft.client.Minecraft
 import org.slf4j.LoggerFactory
 
 object ChunkRebuildGuard {
     private val logger = LoggerFactory.getLogger("RocketLoad")
 
     @Volatile
-    private var lastGeometry: List<String>? = null
-
-    @Volatile
     private var lastBlocks: String? = null
 
-    @JvmStatic
-    fun register(pack: ResourcePack, fuel: RocketFuelFile) = ResourceFingerprints.register(pack, fuel)
+    private var inFinish = false
+
+    private var bypass = false
 
     @JvmStatic
-    fun captureBaseline(client: MinecraftClient) {
-        if (lastGeometry == null) {
-            lastGeometry = geometryFingerprint(client)
-            lastBlocks = AtlasLayouts.blocksLayoutGpu(client)
-            ReloadSkips.rememberBlocksLayout(lastBlocks)
+    fun captureBaseline(mc: Minecraft) {
+        if (lastBlocks == null) lastBlocks = AtlasLayouts.blocksLayout(mc)
+        ReloadSkips.capture(mc.resourceManager)
+    }
+
+    fun duringFinish(action: () -> Unit) {
+        inFinish = true
+        try {
+            action()
+        } finally {
+            inFinish = false
         }
-        ReloadSkips.capture(client.resourceManager)
     }
 
     @JvmStatic
-    fun maybeReload(client: MinecraftClient, worldRenderer: WorldRenderer) {
-        BackgroundReloadDriver.enqueueApply { reloadNow(client, worldRenderer) }
+    fun interceptAllChanged(): Boolean {
+        if (bypass || !inFinish) return false
+        val mc = Minecraft.getInstance() ?: return false
+        BackgroundReloadDriver.enqueueApply("chunk-guard") { decide(mc) }
+        return true
     }
 
-    private fun reloadNow(client: MinecraftClient, worldRenderer: WorldRenderer) {
-        if (!dev.henny.rocketload.RocketLoadConfig.instance.chunkRebuildGuard) {
-            worldRenderer.reload()
-            return
-        }
-        val t0 = System.nanoTime()
-        val geometry = geometryFingerprint(client)
-        val blocks = AtlasLayouts.blocksLayoutGpu(client)
-        val sameGeometry = lastGeometry != null && lastGeometry == geometry
+    private fun decide(mc: Minecraft) {
+        val blocks = AtlasLayouts.blocksLayout(mc)
         val sameBlocks = lastBlocks != null && blocks != null && lastBlocks == blocks
-        ReloadDebug.log(
-            "chunk-guard {} ms sameGeo={} sameBlocks={} blocks={}",
-            (System.nanoTime() - t0) / 1_000_000,
-            sameGeometry,
-            sameBlocks,
-            blocks,
-        )
-        lastGeometry = geometry
         lastBlocks = blocks
-        ReloadSkips.rememberBlocksLayout(blocks)
-
-        if (ReloadSkips.packSetChanged()) {
-            logger.info("[RocketLoad] Pack-Set geaendert - voller WorldRenderer-Reload")
-            TerrainRebuildQueue.clear()
-            worldRenderer.reload()
+        if (!RocketLoadConfig.instance.chunkRebuildGuard || ReloadSkips.packSetChanged()) {
+            full(mc, "Pack-Set geaendert oder Guard aus")
             return
         }
-        if (!ReloadSkips.skippedModels()) {
-            logger.info("[RocketLoad] Modelle neu gebacken - Chunks neu einplanen")
-            TerrainRebuildQueue.clear()
-            worldRenderer.scheduleTerrainUpdate()
+        val geometrySame = ReloadSkips.geometryUnchanged(mc.resourceManager)
+        val visualsSkipped = ReloadSkips.decision(ReloadDomain.VISUALS) == true
+        val colormapsSkipped = ReloadSkips.decision(ReloadDomain.COLORMAPS) != false
+        ReloadDebug.log("chunk-guard sameBlocks={} geometrySame={} visualsSkipped={} colormapsSkipped={}", sameBlocks, geometrySame, visualsSkipped, colormapsSkipped)
+        if (geometrySame && colormapsSkipped && (visualsSkipped || sameBlocks)) {
+            logger.info("[RocketLoad] Geometrie und Block-Atlas unveraendert - kein Chunk-Rebuild")
             return
         }
-        if (sameGeometry && sameBlocks) {
-            logger.info("[RocketLoad] Block-Atlas-UVs unveraendert - kein Chunk-Rebuild")
+        if (McCompat.softTerrainRebuild(mc)) {
+            logger.info("[RocketLoad] Chunks werden im Hintergrund neu gebaut (alte Meshes bleiben sichtbar)")
             return
         }
-        logger.info("[RocketLoad] Chunks neu einplanen (kein Full-Reload)")
-        TerrainRebuildQueue.clear()
-        worldRenderer.scheduleTerrainUpdate()
+        full(mc, "Geometrie/Atlas geaendert")
     }
 
-    private fun geometryFingerprint(client: MinecraftClient): List<String> =
-        ResourceFingerprints.fingerprint(
-            client.resourceManager.streamResourcePacks().toList(),
-            ResourceFingerprints::touchesGeometry,
-        )
+    private fun full(mc: Minecraft, reason: String) {
+        logger.info("[RocketLoad] Voller Chunk-Rebuild: {}", reason)
+        bypass = true
+        try {
+            McCompat.fullTerrainRebuild(mc)
+        } finally {
+            bypass = false
+        }
+    }
 }

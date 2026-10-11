@@ -1,78 +1,98 @@
 package dev.henny.rocketload.client
 
-import net.minecraft.client.MinecraftClient
-import net.minecraft.client.texture.NativeImage
-import net.minecraft.client.texture.NativeImageBackedTexture
-import net.minecraft.client.texture.TextureManager
-import net.minecraft.resource.ResourcePackProfile
-import net.minecraft.util.Identifier
+import com.mojang.blaze3d.platform.NativeImage
+import dev.henny.rocketload.pack.PackMetaCache
+import net.minecraft.client.Minecraft
+import net.minecraft.client.renderer.texture.DynamicTexture
+import net.minecraft.resources.Identifier
+import net.minecraft.server.packs.repository.Pack
 import org.slf4j.LoggerFactory
+import java.io.ByteArrayInputStream
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
-import dev.henny.rocketload.pack.PackMetaCache
 
 object PackIconCache {
     private val logger = LoggerFactory.getLogger("RocketLoad")
+
+    private class Icon(val texture: Identifier, val stamp: Long) {
+        @Volatile
+        var checkedAt = System.nanoTime()
+    }
+
     private val loading = ConcurrentHashMap.newKeySet<String>()
-    private val ready = ConcurrentHashMap<String, Identifier>()
+    private val ready = ConcurrentHashMap<String, Icon>()
     private val threads = AtomicInteger()
+    private val generation = AtomicInteger()
     private val executor = Executors.newFixedThreadPool(4) { task ->
         Thread(task, "RocketLoad-PackIcon-${threads.incrementAndGet()}").apply { isDaemon = true }
     }
 
     @JvmStatic
-    fun get(profile: ResourcePackProfile, unknown: Identifier, textureManager: TextureManager): Identifier {
-        val id = profile.id
-        ready[id]?.let { return it }
-        if (loading.add(id)) {
-            executor.execute { load(profile, id, unknown, textureManager) }
-        }
-        return unknown
+    fun get(pack: Pack, unknown: Identifier): Identifier {
+        val id = pack.id
+        val icon = ready[id]
+        if (icon != null && !isStale(id, icon)) return icon.texture
+        if (loading.add(id)) executor.execute { load(pack, id, unknown) }
+        return icon?.texture ?: unknown
     }
 
-    private fun load(profile: ResourcePackProfile, id: String, unknown: Identifier, textureManager: TextureManager) {
+    private fun isStale(id: String, icon: Icon): Boolean {
+        if (icon.stamp == Long.MIN_VALUE) return false
+        val now = System.nanoTime()
+        if (now - icon.checkedAt < 1_000_000_000L) return false
+        icon.checkedAt = now
+        val current = PackMetaCache.pngForPackId(id)?.second ?: return false
+        return current != icon.stamp
+    }
+
+    private fun load(pack: Pack, id: String, unknown: Identifier) {
         var image: NativeImage? = null
+        var stamp = Long.MIN_VALUE
         try {
-            val cached = PackMetaCache.png(id)
+            val cached = PackMetaCache.pngForPackId(id)
             if (cached != null) {
-                image = NativeImage.read(java.io.ByteArrayInputStream(cached))
+                stamp = cached.second
+                cached.first?.let { image = NativeImage.read(ByteArrayInputStream(it)) }
             } else {
-                profile.createResourcePack().use { pack ->
-                    val supplier = pack.openRoot("pack.png") ?: return@use
-                    supplier.get().use { stream ->
-                        image = NativeImage.read(stream)
-                    }
+                //? if >=26.3 {
+                val resources = pack.openMetadata()
+                //?} else {
+                /*val resources = pack.open()
+                *///?}
+                resources.use { opened ->
+                    opened.getRootResource("pack.png")?.get()?.use { stream -> image = NativeImage.read(stream) }
                 }
             }
         } catch (e: Exception) {
             logger.debug("[RocketLoad] Pack-Icon {} nicht lesbar: {}", id, e.toString())
         }
         val native = image
-        val client = MinecraftClient.getInstance()
-        if (native == null || client == null) {
-            ready[id] = unknown
+        val mc = Minecraft.getInstance()
+        if (native == null || mc == null) {
+            ready[id] = Icon(unknown, stamp)
+            loading.remove(id)
             return
         }
-        client.execute {
+        mc.execute {
             try {
                 val textureId = iconId(id)
-                textureManager.registerTexture(
-                    textureId,
-                    NativeImageBackedTexture({ "pack icon $id" }, native),
-                )
-                ready[id] = textureId
+                mc.textureManager.register(textureId, DynamicTexture({ "pack icon $id" }, native))
+                val old = ready.put(id, Icon(textureId, stamp))
+                if (old != null && old.texture != unknown && old.texture != textureId) mc.textureManager.release(old.texture)
             } catch (e: Exception) {
                 native.close()
-                ready[id] = unknown
+                ready[id] = Icon(unknown, stamp)
                 logger.warn("[RocketLoad] Pack-Icon {} nicht registrierbar: {}", id, e.toString())
+            } finally {
+                loading.remove(id)
             }
         }
     }
 
     private fun iconId(packId: String): Identifier {
         val path = packId.lowercase(Locale.ROOT).replace(Regex("[^a-z0-9/._-]"), "_")
-        return Identifier.of("rocketload", "icon/$path")
+        return Identifier.fromNamespaceAndPath("rocketload", "icon/$path/${generation.incrementAndGet()}")
     }
 }

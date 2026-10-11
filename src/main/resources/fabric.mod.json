@@ -1,10 +1,12 @@
 {
   "schemaVersion": 1,
-  "id": "rocketload",
+  "id": "${id}",
   "version": "${version}",
-  "name": "RocketLoad",
+  "name": "${name}",
   "description": "Loads your resourcepacks like a rocketship.",
-  "authors": [],
+  "authors": [
+    "Henny"
+  ],
   "contact": {},
   "license": "MIT",
   "icon": "assets/rocketload/icon.png",
@@ -12,18 +14,15 @@
   "entrypoints": {
     "client": [
       "dev.henny.rocketload.client.RocketloadClient"
-    ],
-    "main": [
-      "dev.henny.rocketload.Rocketload"
     ]
   },
   "mixins": [
     "rocketload.mixins.json"
   ],
   "depends": {
-    "fabricloader": ">=${loader_version}",
-    "fabric-language-kotlin": ">=${kotlin_loader_version}",
-    "fabric-api": "*",
-    "minecraft": "${minecraft_version}"
+    "fabricloader": ">=${loader}",
+    "fabric-language-kotlin": ">=1.13.0",
+    "fabric-lifecycle-events-v1": "*",
+    "minecraft": "${minecraft}"
   }
 }

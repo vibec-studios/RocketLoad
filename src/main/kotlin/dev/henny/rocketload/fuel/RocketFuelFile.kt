@@ -3,6 +3,8 @@ package dev.henny.rocketload.fuel
 import java.io.IOException
 import java.io.InputStream
 import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.nio.channels.ClosedChannelException
 import java.nio.channels.FileChannel
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
@@ -11,7 +13,7 @@ import java.util.TreeMap
 
 class RocketFuelFile private constructor(
     val path: Path,
-    private val channel: FileChannel,
+    channel: FileChannel,
     val entries: NavigableMap<String, Entry>,
     val sourceSize: Long,
     val sourceMtime: Long,
@@ -28,11 +30,14 @@ class RocketFuelFile private constructor(
         val shaders: Boolean,
         val textures: Boolean,
         val models: Boolean,
+        val blockModels: Boolean,
         val atlases: Boolean,
         val particles: Boolean,
-        val visuals: Boolean,
-        val geometry: Boolean,
-    )
+        val unknown: Boolean,
+    ) {
+        val visuals: Boolean get() = textures || models || atlases || particles || unknown
+        val geometry: Boolean get() = blockModels || colormaps || unknown
+    }
 
     class Entry(val offset: Long, val size: Int)
 
@@ -44,23 +49,50 @@ class RocketFuelFile private constructor(
         val writerVersion: Int,
     )
 
+    @Volatile
+    private var channel: FileChannel = channel
+
+    @Volatile
+    private var closed = false
+
     fun contains(path: String): Boolean = entries.containsKey(path)
 
     fun entry(path: String): Entry? = entries[path]
 
-    fun openStream(entry: Entry): InputStream {
+    fun openStream(entry: Entry): InputStream = FuelEntryStream(this, entry)
+
+    fun readBytes(entry: Entry): ByteArray {
         val data = ByteArray(entry.size)
-        if (entry.size == 0) return java.io.ByteArrayInputStream(data)
-        val buf = ByteBuffer.wrap(data)
+        if (entry.size > 0) read(entry, ByteBuffer.wrap(data))
+        return data
+    }
+
+    fun read(entry: Entry, target: ByteBuffer) {
+        if (target.remaining() < entry.size) throw IOException("Puffer zu klein fuer ${path.fileName}")
+        val view = target.duplicate()
+        view.limit(view.position() + entry.size)
         var pos = entry.offset
-        while (buf.hasRemaining()) {
-            val n = channel.read(buf, pos)
-            if (n <= 0) {
-                throw IOException("Unvollstaendiger Fuel-Eintrag ${path.fileName} @ $pos (rest=${buf.remaining()})")
+        var reopened = 0
+        while (view.hasRemaining()) {
+            val interrupted = Thread.interrupted()
+            try {
+                val n = channel.read(view, pos)
+                if (n < 0) throw IOException("Unvollstaendiger Fuel-Eintrag ${path.fileName} @ $pos")
+                pos += n
+            } catch (e: ClosedChannelException) {
+                if (closed || ++reopened > 3) throw e
+                reopen()
+            } finally {
+                if (interrupted) Thread.currentThread().interrupt()
             }
-            pos += n
         }
-        return java.io.ByteArrayInputStream(data)
+        target.position(target.position() + entry.size)
+    }
+
+    @Synchronized
+    private fun reopen() {
+        if (closed || channel.isOpen) return
+        channel = FileChannel.open(path, StandardOpenOption.READ)
     }
 
     inline fun forEachWithPrefix(prefix: String, action: (String, Entry) -> Unit) {
@@ -87,11 +119,19 @@ class RocketFuelFile private constructor(
         return result
     }
 
+    @Synchronized
     override fun close() {
+        closed = true
         channel.close()
     }
 
     companion object {
+        private val KNOWN_ASSET_DIRS = setOf(
+            "sounds", "sounds.json", "texts", "lang", "font", "shaders", "post_effect", "textures",
+            "models", "blockstates", "items", "atlases", "particles", "equipment", "waypoint_style",
+            "regional_compliancies.json", "gpu_warnlist.json", "icons",
+        )
+
         @Throws(IOException::class)
         fun readHeader(path: Path): Header {
             FileChannel.open(path, StandardOpenOption.READ).use { channel ->
@@ -110,15 +150,10 @@ class RocketFuelFile private constructor(
             if (!magic.contentEquals(RocketFuelFormat.MAGIC)) throw IOException("Kein .rocketfuel: $path")
             val version = buf.int
             if (version != RocketFuelFormat.VERSION) throw IOException("Unbekannte Formatversion $version: $path")
-            val sourceSize = buf.long
-            val sourceMtime = buf.long
-            val indexOffset = buf.long
-            val entryCount = buf.int
-            val writerVersion = buf.int
-            return Header(sourceSize, sourceMtime, indexOffset, entryCount, writerVersion)
+            return Header(buf.long, buf.long, buf.long, buf.int, buf.int)
         }
 
-        private class DomainCollector {
+        internal class DomainCollector {
             var sounds = false
             var texts = false
             var colormaps = false
@@ -127,10 +162,10 @@ class RocketFuelFile private constructor(
             var shaders = false
             var textures = false
             var models = false
+            var blockModels = false
             var atlases = false
             var particles = false
-            var visuals = false
-            var geometry = false
+            var unknown = false
 
             fun note(path: String) {
                 if (!path.startsWith("assets/")) return
@@ -143,46 +178,27 @@ class RocketFuelFile private constructor(
                     "sounds", "sounds.json" -> sounds = true
                     "texts" -> texts = true
                     "lang" -> lang = true
-                    "font" -> {
-                        fonts = true
-                    }
-                    "shaders", "post_effect" -> {
-                        shaders = true
-                        geometry = true
-                    }
+                    "font" -> fonts = true
+                    "shaders", "post_effect" -> shaders = true
                     "textures" -> {
                         textures = true
-                        visuals = true
                         if (rest.startsWith("font/")) fonts = true
-                        if (rest.startsWith("colormap/")) {
-                            colormaps = true
-                            geometry = true
-                        }
+                        if (rest.startsWith("colormap/")) colormaps = true
                     }
                     "models", "blockstates" -> {
                         models = true
-                        visuals = true
-                        geometry = true
+                        blockModels = true
                     }
-                    "items" -> {
-                        models = true
-                        visuals = true
-                    }
-                    "atlases" -> {
-                        atlases = true
-                        visuals = true
-                        geometry = true
-                    }
-                    "particles" -> {
-                        particles = true
-                        visuals = true
-                    }
+                    "items" -> models = true
+                    "atlases" -> atlases = true
+                    "particles" -> particles = true
+                    else -> if (dirEnd >= 0 && dir !in KNOWN_ASSET_DIRS) unknown = true
                 }
             }
 
             fun build() = Domains(
                 sounds, texts, colormaps, lang, fonts, shaders,
-                textures, models, atlases, particles, visuals, geometry,
+                textures, models, blockModels, atlases, particles, unknown,
             )
         }
 
@@ -194,34 +210,24 @@ class RocketFuelFile private constructor(
                 if (size < RocketFuelFormat.HEADER_SIZE) throw IOException("Datei zu klein: $path")
                 if (size > Int.MAX_VALUE) throw IOException("Packs > 2 GiB werden nicht unterstuetzt: $path")
 
-                val headerBuf = ByteBuffer.allocate(RocketFuelFormat.HEADER_SIZE).order(java.nio.ByteOrder.BIG_ENDIAN)
-                var headerPos = 0L
-                while (headerBuf.hasRemaining()) {
-                    val n = channel.read(headerBuf, headerPos)
-                    if (n <= 0) throw IOException("Datei zu klein: $path")
-                    headerPos += n
-                }
+                val headerBuf = ByteBuffer.allocate(RocketFuelFormat.HEADER_SIZE).order(ByteOrder.BIG_ENDIAN)
+                readFully(channel, headerBuf, 0L, path)
                 headerBuf.flip()
                 val header = parseHeader(headerBuf, path)
                 if (header.indexOffset < RocketFuelFormat.HEADER_SIZE || header.indexOffset > size) {
                     throw IOException("Korrupter Index-Offset: $path")
                 }
 
-                val indexSize = (size - header.indexOffset).toInt()
-                val index = ByteBuffer.allocate(indexSize).order(java.nio.ByteOrder.BIG_ENDIAN)
-                var indexPos = header.indexOffset
-                while (index.hasRemaining()) {
-                    val n = channel.read(index, indexPos)
-                    if (n <= 0) throw IOException("Korrupter Index: $path")
-                    indexPos += n
-                }
+                val index = ByteBuffer.allocate((size - header.indexOffset).toInt()).order(ByteOrder.BIG_ENDIAN)
+                readFully(channel, index, header.indexOffset, path)
                 index.flip()
 
                 val entries = TreeMap<String, Entry>()
                 val domains = DomainCollector()
                 repeat(header.entryCount) {
+                    if (index.remaining() < 4) throw IOException("Korrupter Index: $path")
                     val pathLen = index.int
-                    if (pathLen < 0 || pathLen > index.remaining()) throw IOException("Korrupter Index: $path")
+                    if (pathLen < 0 || pathLen + 12 > index.remaining()) throw IOException("Korrupter Index: $path")
                     val pathBytes = ByteArray(pathLen)
                     index.get(pathBytes)
                     val entryPath = String(pathBytes, Charsets.UTF_8)
@@ -242,6 +248,15 @@ class RocketFuelFile private constructor(
             } catch (t: Throwable) {
                 channel.close()
                 throw t
+            }
+        }
+
+        private fun readFully(channel: FileChannel, buf: ByteBuffer, start: Long, path: Path) {
+            var pos = start
+            while (buf.hasRemaining()) {
+                val n = channel.read(buf, pos)
+                if (n <= 0) throw IOException("Datei zu klein: $path")
+                pos += n
             }
         }
     }

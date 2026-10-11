@@ -19,3 +19,9 @@ hs_err_pid*
 
 # Common working directory
 run
+
+# Kotlin
+.kotlin/
+
+# Stonecutter
+versions/*/build/

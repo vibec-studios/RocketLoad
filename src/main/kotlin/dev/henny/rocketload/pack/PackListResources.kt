@@ -1,39 +1,44 @@
 package dev.henny.rocketload.pack
 
-import net.minecraft.resource.AbstractFileResourcePack
-import net.minecraft.resource.InputSupplier
-import net.minecraft.resource.ResourcePack
-import net.minecraft.resource.ResourcePackInfo
-import net.minecraft.resource.ResourceType
-import net.minecraft.util.Identifier
+import net.minecraft.server.packs.PackLocationInfo
+import net.minecraft.server.packs.resources.IoSupplier
 import java.io.ByteArrayInputStream
 import java.io.InputStream
+//? if >=26.3 {
+import net.minecraft.server.packs.AbstractPackMetadataResources
+//?} else {
+/*import net.minecraft.resources.Identifier
+import net.minecraft.server.packs.AbstractPackResources
+import net.minecraft.server.packs.PackResources
+import net.minecraft.server.packs.PackType
+*///?}
 
 class PackListResources(
-    info: ResourcePackInfo,
+    info: PackLocationInfo,
     private val mcmeta: ByteArray,
     private val png: ByteArray?,
-) : AbstractFileResourcePack(info) {
+//? if >=26.3 {
+) : AbstractPackMetadataResources(info) {
+//?} else {
+/*) : AbstractPackResources(info) {
+*///?}
 
-    override fun openRoot(vararg segments: String): InputSupplier<InputStream>? {
-        return when (segments.joinToString("/")) {
-            "pack.mcmeta" -> InputSupplier { ByteArrayInputStream(mcmeta) }
-            "pack.png" -> png?.let { bytes -> InputSupplier { ByteArrayInputStream(bytes) } }
+    override fun getRootResource(vararg path: String): IoSupplier<InputStream>? {
+        return when (path.joinToString("/")) {
+            "pack.mcmeta" -> IoSupplier { ByteArrayInputStream(mcmeta) }
+            "pack.png" -> png?.let { bytes -> IoSupplier { ByteArrayInputStream(bytes) } }
             else -> null
         }
     }
 
-    override fun open(type: ResourceType, id: Identifier): InputSupplier<InputStream>? = null
+    //? if <26.3 {
+    /*override fun getResource(type: PackType, id: Identifier): IoSupplier<InputStream>? = null
 
-    override fun findResources(
-        type: ResourceType,
-        namespace: String,
-        prefix: String,
-        consumer: ResourcePack.ResultConsumer,
-    ) {
+    override fun listResources(type: PackType, namespace: String, prefix: String, output: PackResources.ResourceOutput) {
     }
 
-    override fun getNamespaces(type: ResourceType): Set<String> = emptySet()
+    override fun getNamespaces(type: PackType): Set<String> = emptySet()
+    *///?}
 
     override fun close() {
     }

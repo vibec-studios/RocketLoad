@@ -1,14 +1,13 @@
 package dev.henny.rocketload.pack
 
 import net.fabricmc.loader.api.FabricLoader
-import net.minecraft.resource.ResourcePack
-import net.minecraft.resource.ResourcePackInfo
 import org.slf4j.LoggerFactory
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.File
 import java.nio.file.Files
 import java.nio.file.Path
+import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
@@ -18,14 +17,15 @@ import java.util.zip.ZipFile
 object PackMetaCache {
     private val logger = LoggerFactory.getLogger("RocketLoad")
     private const val MAGIC = "RLPM"
-    private const val VERSION = 1
+    private const val VERSION = 2
+    private const val MAX_PNG = 2L * 1024 * 1024
     private val wanted = setOf("pack.mcmeta", "pack.png")
 
-    data class Entry(val size: Long, val mtime: Long, val mcmeta: ByteArray, val png: ByteArray?)
+    class Entry(val size: Long, val mtime: Long, val mcmeta: ByteArray, val png: ByteArray?)
 
     private val memory = ConcurrentHashMap<Path, Entry>()
     private val threads = AtomicInteger()
-    private val executor = Executors.newFixedThreadPool(8) { task ->
+    private val executor = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors().coerceIn(2, 8)) { task ->
         Thread(task, "RocketLoad-PackMeta-${threads.incrementAndGet()}").apply { isDaemon = true }
     }
 
@@ -36,60 +36,64 @@ object PackMetaCache {
     }
 
     fun prefetchAsync(packsDir: Path) {
-        executor.execute {
+        Thread({
             val start = System.nanoTime()
             val n = prefetchBlocking(packsDir)
-            logger.info(
-                "[RocketLoad] Pack-Metadaten vorbereitet: {} Datei(en) in {} ms",
-                n,
-                (System.nanoTime() - start) / 1_000_000,
-            )
-        }
+            logger.info("[RocketLoad] Pack-Metadaten vorbereitet: {} Datei(en) in {} ms", n, (System.nanoTime() - start) / 1_000_000)
+        }, "RocketLoad-PackMeta-Prefetch").apply { isDaemon = true }.start()
     }
 
     fun prefetchBlocking(packsDir: Path): Int {
         if (!Files.isDirectory(packsDir)) return 0
-        val jobs = ArrayList<Future<*>>()
-        Files.newDirectoryStream(packsDir).use { stream ->
-            for (child in stream) {
-                val name = child.fileName.toString()
-                if (name.startsWith(".")) continue
-                if (Files.isRegularFile(child) && name.endsWith(".zip", true)) {
-                    jobs += executor.submit<Entry?> { ensure(child) }
-                } else if (Files.isDirectory(child) && Files.isRegularFile(child.resolve("pack.mcmeta"))) {
-                    jobs += executor.submit<Entry?> { ensure(child) }
+        val jobs = ArrayList<Future<Entry?>>()
+        try {
+            Files.newDirectoryStream(packsDir).use { stream ->
+                for (child in stream) {
+                    val name = child.fileName.toString()
+                    if (name.startsWith(".")) continue
+                    val isZip = name.endsWith(".zip", true) && Files.isRegularFile(child)
+                    val isDir = Files.isDirectory(child) && Files.isRegularFile(child.resolve("pack.mcmeta"))
+                    if (isZip || isDir) jobs += executor.submit<Entry?> { ensure(child) }
                 }
             }
+        } catch (e: Exception) {
+            logger.debug("[RocketLoad] Pack-Ordner nicht lesbar: {}", e.toString())
         }
-        var ok = 0
-        for (job in jobs) {
-            try {
-                if (job.get() != null) ok++
-            } catch (_: Exception) {
+        return jobs.count { runCatching { it.get() != null }.getOrDefault(false) }
+    }
+
+    fun openMetadataPack(file: File): Entry? = ensure(file.toPath())
+
+    fun pngForPackId(packId: String): Pair<ByteArray?, Long>? {
+        if (!packId.startsWith("file/")) return null
+        val path = FabricLoader.getInstance().gameDir.resolve("resourcepacks").resolve(packId.substring(5))
+        val entry = ensure(path) ?: return null
+        return entry.png to (entry.size * 31 + entry.mtime)
+    }
+
+    private class Stamp(val size: Long, val mtime: Long)
+
+    private fun stamp(abs: Path): Stamp {
+        if (!Files.isDirectory(abs)) return Stamp(Files.size(abs), Files.getLastModifiedTime(abs).toMillis())
+        var size = 0L
+        var mtime = 0L
+        for (name in wanted) {
+            val file = abs.resolve(name)
+            if (Files.isRegularFile(file)) {
+                size = size * 1_000_003 + Files.size(file)
+                mtime = mtime * 31 + Files.getLastModifiedTime(file).toMillis()
             }
         }
-        return ok
-    }
-
-    fun openListPack(file: File, info: ResourcePackInfo): ResourcePack? {
-        val entry = ensure(file.toPath()) ?: return null
-        return PackListResources(info, entry.mcmeta, entry.png)
-    }
-
-    fun png(packId: String): ByteArray? {
-        val relative = if (packId.startsWith("file/")) packId.substring(5) else packId
-        val path = FabricLoader.getInstance().gameDir.resolve("resourcepacks").resolve(relative)
-        return ensure(path)?.png
+        return Stamp(size, mtime)
     }
 
     fun ensure(path: Path): Entry? {
         val abs = path.toAbsolutePath().normalize()
         return try {
-            val size = Files.size(abs)
-            val mtime = Files.getLastModifiedTime(abs).toMillis()
-            memory[abs]?.let { if (it.size == size && it.mtime == mtime) return it }
-            readDisk(abs, size, mtime)?.also { memory[abs] = it }
-                ?: loadFresh(abs, size, mtime)?.also {
+            val stamp = stamp(abs)
+            memory[abs]?.let { if (it.size == stamp.size && it.mtime == stamp.mtime) return it }
+            readDisk(abs, stamp)?.also { memory[abs] = it }
+                ?: loadFresh(abs, stamp)?.also {
                     memory[abs] = it
                     writeDisk(abs, it)
                 }
@@ -99,7 +103,7 @@ object PackMetaCache {
         }
     }
 
-    private fun loadFresh(path: Path, size: Long, mtime: Long): Entry? {
+    private fun loadFresh(path: Path, stamp: Stamp): Entry? {
         val mcmeta: ByteArray
         val png: ByteArray?
         if (Files.isDirectory(path)) {
@@ -107,11 +111,7 @@ object PackMetaCache {
             if (!Files.isRegularFile(metaFile)) return null
             mcmeta = Files.readAllBytes(metaFile)
             val pngFile = path.resolve("pack.png")
-            png = if (Files.isRegularFile(pngFile) && Files.size(pngFile) <= 2L * 1024 * 1024) {
-                Files.readAllBytes(pngFile)
-            } else {
-                null
-            }
+            png = if (Files.isRegularFile(pngFile) && Files.size(pngFile) <= MAX_PNG) Files.readAllBytes(pngFile) else null
         } else {
             val file = path.toFile()
             val roots = try {
@@ -120,9 +120,9 @@ object PackMetaCache {
                 zipFallback(file)
             }
             mcmeta = roots["pack.mcmeta"] ?: return null
-            png = roots["pack.png"]?.takeIf { it.size <= 2 * 1024 * 1024 }
+            png = roots["pack.png"]
         }
-        return Entry(size, mtime, mcmeta, png)
+        return Entry(stamp.size, stamp.mtime, mcmeta, png)
     }
 
     private fun zipFallback(file: File): Map<String, ByteArray> {
@@ -130,37 +130,35 @@ object PackMetaCache {
             val out = HashMap<String, ByteArray>()
             for (name in wanted) {
                 val entry = zip.getEntry(name) ?: continue
-                if (entry.size > 2L * 1024 * 1024) continue
-                zip.getInputStream(entry).use { stream ->
-                    out[name] = stream.readBytes()
-                }
+                if (entry.size > MAX_PNG) continue
+                zip.getInputStream(entry).use { stream -> out[name] = stream.readBytes() }
             }
             return out
         }
     }
 
     private fun diskFile(path: Path): Path {
-        val key = path.toString().hashCode().toUInt().toString(16)
+        val digest = MessageDigest.getInstance("SHA-256").digest(path.toString().toByteArray(Charsets.UTF_8))
+        val key = digest.joinToString("") { "%02x".format(it) }.take(16)
         val name = path.fileName.toString().replace(Regex("[^A-Za-z0-9._-]"), "_").take(48)
         return diskDir.resolve("$name-$key.rlmeta")
     }
 
-    private fun readDisk(path: Path, size: Long, mtime: Long): Entry? {
+    private fun readDisk(path: Path, stamp: Stamp): Entry? {
         val file = diskFile(path)
         if (!Files.isRegularFile(file)) return null
         return try {
-            DataInputStream(Files.newInputStream(file)).use { input ->
-                val magic = input.readUTF()
-                val version = input.readInt()
-                if (magic != MAGIC || version != VERSION) return null
-                val storedSize = input.readLong()
-                val storedMtime = input.readLong()
-                if (storedSize != size || storedMtime != mtime) return null
-                val meta = ByteArray(input.readInt())
-                input.readFully(meta)
+            DataInputStream(Files.newInputStream(file).buffered()).use { input ->
+                if (input.readUTF() != MAGIC || input.readInt() != VERSION) return null
+                if (input.readUTF() != path.toString()) return null
+                if (input.readLong() != stamp.size || input.readLong() != stamp.mtime) return null
+                val metaLen = input.readInt()
+                if (metaLen !in 0..MAX_PNG.toInt()) return null
+                val meta = ByteArray(metaLen).also { input.readFully(it) }
                 val pngLen = input.readInt()
+                if (pngLen !in 0..MAX_PNG.toInt()) return null
                 val png = if (pngLen > 0) ByteArray(pngLen).also { input.readFully(it) } else null
-                Entry(size, mtime, meta, png)
+                Entry(stamp.size, stamp.mtime, meta, png)
             }
         } catch (_: Exception) {
             null
@@ -169,18 +167,35 @@ object PackMetaCache {
 
     private fun writeDisk(path: Path, entry: Entry) {
         try {
-            DataOutputStream(Files.newOutputStream(diskFile(path))).use { out ->
+            DataOutputStream(Files.newOutputStream(diskFile(path)).buffered()).use { out ->
                 out.writeUTF(MAGIC)
                 out.writeInt(VERSION)
+                out.writeUTF(path.toString())
                 out.writeLong(entry.size)
                 out.writeLong(entry.mtime)
                 out.writeInt(entry.mcmeta.size)
                 out.write(entry.mcmeta)
                 out.writeInt(entry.png?.size ?: 0)
-                if (entry.png != null) out.write(entry.png)
+                entry.png?.let { out.write(it) }
             }
         } catch (e: Exception) {
             logger.debug("[RocketLoad] Pack-Meta-Cache nicht schreibbar: {}", e.toString())
+        }
+    }
+
+    fun housekeeping(retentionDays: Int) {
+        if (retentionDays <= 0) return
+        val cutoff = System.currentTimeMillis() - retentionDays.toLong() * 24 * 60 * 60 * 1000
+        executor.execute {
+            try {
+                Files.list(diskDir).use { stream ->
+                    for (file in stream.toList()) {
+                        if (!file.fileName.toString().endsWith(".rlmeta")) continue
+                        if (Files.getLastModifiedTime(file).toMillis() < cutoff) runCatching { Files.deleteIfExists(file) }
+                    }
+                }
+            } catch (_: Exception) {
+            }
         }
     }
 }

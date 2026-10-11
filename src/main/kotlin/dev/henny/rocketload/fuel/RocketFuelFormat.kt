@@ -8,5 +8,5 @@ object RocketFuelFormat {
     const val VERSION: Int = 1
     const val HEADER_SIZE: Int = 44
     const val FILE_EXTENSION: String = ".rocketfuel"
-    const val WRITER_VERSION: Int = 3
+    const val WRITER_VERSION: Int = 4
 }

@@ -1,62 +1,68 @@
 package dev.henny.rocketload
 
-import dev.henny.rocketload.client.ChunkRebuildGuard
+import dev.henny.rocketload.client.ResourceFingerprints
 import dev.henny.rocketload.fuel.RocketFuelCache
+import dev.henny.rocketload.pack.PackListResources
+import dev.henny.rocketload.pack.PackMetaCache
 import dev.henny.rocketload.pack.RocketFuelPackResources
-import net.minecraft.resource.OverlayResourcePack
-import net.minecraft.resource.ResourcePack
-import net.minecraft.resource.ResourcePackInfo
-import net.minecraft.resource.ResourcePackProfile
+import net.minecraft.server.packs.PackLocationInfo
+import net.minecraft.server.packs.PackResources
+import net.minecraft.server.packs.repository.Pack
 import java.io.File
+//? if >=26.3 {
+import net.minecraft.server.packs.OverlayedPackResources
+//?} else {
+/*import net.minecraft.server.packs.CompositePackResources
+*///?}
 
 object RocketLoadHooks {
 
-    private val fullOpen = ThreadLocal.withInitial { false }
+    private val fullOpen = ThreadLocal.withInitial { 0 }
 
     @JvmStatic
     fun beginFullOpen() {
-        fullOpen.set(true)
+        fullOpen.set(fullOpen.get() + 1)
     }
 
     @JvmStatic
     fun endFullOpen() {
-        fullOpen.set(false)
+        fullOpen.set((fullOpen.get() - 1).coerceAtLeast(0))
     }
 
     @JvmStatic
-    fun isFullOpen(): Boolean = fullOpen.get()
+    fun isFullOpen(): Boolean = fullOpen.get() > 0
 
     @JvmStatic
-    fun openPrimary(content: File, info: ResourcePackInfo): ResourcePack? {
-        val fuel = RocketFuelCache.get(content.toPath()) ?: return null
-        val pack = RocketFuelPackResources(info, fuel)
-        ChunkRebuildGuard.register(pack, fuel)
-        return pack
+    fun trackZip(pack: Any, file: File) {
+        if (ResourceFingerprints.fuelOf(pack) == null) ResourceFingerprints.registerZip(pack, file)
     }
 
     @JvmStatic
-    fun openFull(content: File, info: ResourcePackInfo, metadata: ResourcePackProfile.Metadata): ResourcePack? {
+    fun openMetadata(content: File, info: PackLocationInfo): PackListResources? {
+        val entry = PackMetaCache.openMetadataPack(content) ?: return null
+        return PackListResources(info, entry.mcmeta, entry.png)
+    }
+
+    @JvmStatic
+    fun openFull(content: File, info: PackLocationInfo, metadata: Pack.Metadata): PackResources? {
         val source = content.toPath()
-        val fuel = RocketFuelCache.get(source)
+        val fuel = RocketFuelCache.acquire(source)
         if (fuel == null) {
             RocketFuelCache.scheduleConvert(source)
             return null
         }
         val primary = RocketFuelPackResources(info, fuel)
-        ChunkRebuildGuard.register(primary, fuel)
         val overlays = metadata.overlays()
-        val result: ResourcePack = if (overlays.isEmpty()) {
-            primary
-        } else {
-            OverlayResourcePack(
-                primary,
-                overlays.map { overlay ->
-                    RocketFuelPackResources(info, fuel, overlay, releaseOnClose = false)
-                        .also { ChunkRebuildGuard.register(it, fuel) }
-                },
-            )
+        if (overlays.isEmpty()) return primary
+        val overlayPacks: List<PackResources> = overlays.map { overlay ->
+            RocketFuelPackResources(info, fuel, overlay, releaseOnClose = false)
         }
-        ChunkRebuildGuard.register(result, fuel)
+        //? if >=26.3 {
+        val result = OverlayedPackResources(primary, overlayPacks)
+        //?} else {
+        /*val result = CompositePackResources(primary, overlayPacks)
+        *///?}
+        ResourceFingerprints.register(result, fuel)
         return result
     }
 }

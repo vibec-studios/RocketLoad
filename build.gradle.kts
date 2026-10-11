@@ -1,97 +1,114 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
-import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 
 plugins {
-    kotlin("jvm") version "2.4.0"
-    id("net.fabricmc.fabric-loom-remap") version "1.17.21"
-    id("maven-publish")
+    id("dev.kikugie.loom-back-compat")
+    kotlin("jvm")
 }
 
-version = project.property("mod_version") as String
-group = project.property("maven_group") as String
+version = "${property("mod.version")}+${sc.current.version}"
+base.archivesName = property("mod.id") as String
 
-base {
-    archivesName.set(project.property("archives_base_name") as String)
-}
-
-val targetJavaVersion = 21
-java {
-    toolchain.languageVersion = JavaLanguageVersion.of(25)
-    withSourcesJar()
-}
-
-repositories {
+val requiredJava: JavaVersion = when {
+    sc.current.parsed >= "26.1" -> JavaVersion.VERSION_25
+    else -> JavaVersion.VERSION_21
 }
 
 dependencies {
-    minecraft("com.mojang:minecraft:${project.property("minecraft_version")}")
-    mappings("net.fabricmc:yarn:${project.property("yarn_mappings")}:v2")
-    modImplementation("net.fabricmc:fabric-loader:${project.property("loader_version")}")
-    modImplementation("net.fabricmc:fabric-language-kotlin:${project.property("kotlin_loader_version")}")
-    modImplementation("net.fabricmc.fabric-api:fabric-api:${project.property("fabric_version")}")
+    fun fapi(vararg modules: String) {
+        for (it in modules) modImplementation(fabricApi.module(it, sc.properties["deps.fabric_api"]))
+    }
+
+    minecraft("com.mojang:minecraft:${sc.current.version}")
+    loomx.applyMojangMappings()
+
+    modImplementation("net.fabricmc:fabric-loader:${property("deps.fabric_loader")}")
+    modImplementation("net.fabricmc:fabric-language-kotlin:${property("deps.fabric_kotlin")}")
+    fapi("fabric-api-base", "fabric-lifecycle-events-v1")
+
+    testImplementation(platform("org.junit:junit-bom:5.13.4"))
+    testImplementation("org.junit.jupiter:junit-jupiter")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
-tasks.processResources {
-    inputs.property("version", project.version)
-    inputs.property("minecraft_version", project.property("minecraft_version"))
-    inputs.property("loader_version", project.property("loader_version"))
-    filteringCharset = "UTF-8"
+loom {
+    fabricModJsonPath = rootProject.file("src/main/resources/fabric.mod.json")
 
-    filesMatching("fabric.mod.json") {
-        expand(
-            "version" to project.version,
-            "minecraft_version" to project.property("minecraft_version") as String,
-            "loader_version" to project.property("loader_version") as String,
-            "kotlin_loader_version" to project.property("kotlin_loader_version") as String
-        )
+    decompilerOptions.named("vineflower") {
+        options.put("mark-corresponding-synthetics", "1")
+    }
+
+    runConfigs.all {
+        preferGradleTask = true
+        generateRunConfig = true
+        runDirectory = rootProject.file("run")
     }
 }
 
-tasks.withType<JavaCompile>().configureEach {
-    options.encoding = "UTF-8"
-    options.release.set(targetJavaVersion)
-}
+java {
+    withSourcesJar()
+    targetCompatibility = requiredJava
+    sourceCompatibility = requiredJava
 
-tasks.withType<KotlinCompile>().configureEach {
-    compilerOptions.jvmTarget.set(JvmTarget.fromTarget(targetJavaVersion.toString()))
-}
-
-tasks.jar {
-    from("LICENSE") {
-        rename { "${it}_${project.base.archivesName.get()}" }
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(requiredJava.majorVersion)
     }
 }
 
-tasks.register<Jar>("devJar") {
-    group = "build"
-    description = "Remapped jar with RocketLoad debug timings"
-    dependsOn("remapJar")
-    archiveBaseName.set(project.property("archives_base_name") as String)
-    archiveVersion.set(project.version.toString())
-    archiveClassifier.set("dev")
-    destinationDirectory.set(layout.buildDirectory.dir("libs"))
-    from({
-        zipTree(tasks.named("remapJar").get().outputs.files.singleFile)
-    })
-    from("src/dev/resources")
-    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+kotlin {
+    compilerOptions.jvmTarget.set(JvmTarget.fromTarget(requiredJava.majorVersion))
 }
 
-tasks.named("remapJar") {
-    finalizedBy("devJar")
-}
-
-tasks.named("build") {
-    dependsOn("devJar")
-}
-
-publishing {
-    publications {
-        create<MavenPublication>("mavenJava") {
-            artifactId = project.property("archives_base_name") as String
-            from(components["java"])
+tasks {
+    processResources {
+        fun MutableMap<String, String>.register(key: String, value: String) {
+            inputs.property(key, value)
+            set(key, value)
         }
+
+        val props = buildMap {
+            register("id", sc.properties["mod.id"])
+            register("name", sc.properties["mod.name"])
+            register("version", project.version.toString())
+            register("minecraft", sc.properties["mod.mc_compat"])
+            register("loader", Regex("\\d+\\.\\d+").find(sc.properties.get<String>("deps.fabric_loader"))!!.value)
+            register("kotlin", sc.properties["deps.fabric_kotlin"])
+        }
+
+        filesMatching("fabric.mod.json") { expand(props) }
+
+        val mixinJava = "JAVA_${requiredJava.majorVersion}"
+        inputs.property("java", mixinJava)
+        filesMatching("*.mixins.json") { expand("java" to mixinJava) }
     }
-    repositories {
+
+    withType<JavaCompile>().configureEach {
+        options.encoding = "UTF-8"
+    }
+
+    withType<Jar> {
+        val name = project.property("mod.id")
+        inputs.property("mod_id", name)
+        from(rootProject.file("LICENSE.txt")) { rename { "LICENSE-$name.txt" } }
+    }
+
+    test {
+        useJUnitPlatform()
+    }
+
+    val devJar = register<Jar>("devJar") {
+        group = "build"
+        description = "Mod jar with RocketLoad debug timings enabled"
+        archiveClassifier.set("dev")
+        from(loomx.modJar.flatMap { it.archiveFile }.map { zipTree(it) })
+        from(rootProject.file("src/dev/resources"))
+        duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    }
+
+    register<Copy>("buildAndCollect") {
+        group = "build"
+        description = "Builds mod jars and copies them to build/libs/{mod version}/"
+        inputs.property("version", project.property("mod.version"))
+        from(loomx.modJar.flatMap { it.archiveFile }, devJar.flatMap { it.archiveFile })
+        into(rootProject.layout.buildDirectory.dir("libs/${project.property("mod.version")}"))
     }
 }

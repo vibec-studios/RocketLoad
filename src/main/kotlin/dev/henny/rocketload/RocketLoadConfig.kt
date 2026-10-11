@@ -9,20 +9,18 @@ import java.nio.file.Path
 class RocketLoadConfig {
     var backgroundReload: Boolean = true
     var applyBudgetMsPerTick: Int = 3
+    var spreadAtlasUpload: Boolean = true
     var toasts: Boolean = true
     var chunkRebuildGuard: Boolean = true
     var selectiveReload: Boolean = true
     var optimizeTextures: Boolean = true
+    var pngCompressionLevel: Int = 6
     var warmupConversion: Boolean = true
     var jsonMinify: Boolean = true
     var deduplicate: Boolean = true
     var cacheRetentionDays: Int = 14
     var debugTimings: Boolean = false
     var pauseIntegratedServerDuringReload: Boolean = true
-    var closePackScreenImmediately: Boolean = true
-    var skipUnchangedSprites: Boolean = false
-    var spreadTerrainRebuilds: Boolean = false
-    var chunkRebuildsPerFrame: Int = 48
 
     companion object {
         private val logger = LoggerFactory.getLogger("RocketLoad")
@@ -38,8 +36,7 @@ class RocketLoadConfig {
         private fun load(): RocketLoadConfig {
             val config = try {
                 if (Files.isRegularFile(path)) {
-                    Files.newBufferedReader(path).use { gson.fromJson(it, RocketLoadConfig::class.java) }
-                        ?: RocketLoadConfig()
+                    Files.newBufferedReader(path).use { gson.fromJson(it, RocketLoadConfig::class.java) } ?: RocketLoadConfig()
                 } else {
                     RocketLoadConfig()
                 }
@@ -47,8 +44,8 @@ class RocketLoadConfig {
                 logger.warn("[RocketLoad] Config nicht lesbar, nutze Defaults: {}", e.toString())
                 RocketLoadConfig()
             }
-            config.skipUnchangedSprites = false
-            config.spreadTerrainRebuilds = false
+            config.applyBudgetMsPerTick = config.applyBudgetMsPerTick.coerceIn(0, 50)
+            config.pngCompressionLevel = config.pngCompressionLevel.coerceIn(1, 9)
             try {
                 Files.createDirectories(path.parent)
                 Files.newBufferedWriter(path).use { gson.toJson(config, it) }

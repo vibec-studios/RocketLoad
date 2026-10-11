@@ -1,5 +1,8 @@
 package dev.henny.rocketload.fuel
 
+import dev.henny.rocketload.RocketLoadConfig
+import dev.henny.rocketload.api.impl.RocketLoadApiImpl
+import dev.henny.rocketload.client.ReloadDebug
 import net.fabricmc.loader.api.FabricLoader
 import org.slf4j.LoggerFactory
 import java.io.IOException
@@ -8,145 +11,178 @@ import java.nio.file.Path
 import java.nio.file.attribute.BasicFileAttributes
 import java.nio.file.attribute.FileTime
 import java.security.MessageDigest
+import java.util.IdentityHashMap
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 
 object RocketFuelCache {
     private val logger = LoggerFactory.getLogger("RocketLoad")
+    private const val TOUCH_INTERVAL_MS = 6L * 60 * 60 * 1000
 
-    private class Holder(val fuel: RocketFuelFile) {
-        val refs = AtomicInteger(0)
+    private class Holder(val key: Path, val fuel: RocketFuelFile) {
+        var refs = 0
     }
 
-    private val cacheDir: Path by lazy {
+    val cacheDir: Path by lazy {
         val dir = FabricLoader.getInstance().gameDir.resolve("rocketload").resolve("cache")
         Files.createDirectories(dir)
-        logger.info("[RocketLoad] Cache-Verzeichnis: {}", dir)
         dir
     }
 
-    private val open = HashMap<Path, Holder>()
+    private val byPath = HashMap<Path, Holder>()
+    private val byFuel = IdentityHashMap<RocketFuelFile, Holder>()
     private val converting = ConcurrentHashMap.newKeySet<Path>()
     private val threadCounter = AtomicInteger()
-    private val executor = Executors.newFixedThreadPool(1) { r ->
-        Thread(r, "RocketLoad-Converter-${threadCounter.incrementAndGet()}").apply { isDaemon = true }
+
+    private val cores = Runtime.getRuntime().availableProcessors()
+
+    private val executor: ExecutorService = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "RocketLoad-Converter").apply {
+            isDaemon = true
+            priority = Thread.MIN_PRIORITY + 1
+        }
     }
 
-    fun get(source: Path): RocketFuelFile? = acquire(source)
+    private val workers: ExecutorService = Executors.newFixedThreadPool((cores / 2).coerceIn(1, 6)) { r ->
+        Thread(r, "RocketLoad-Optimizer-${threadCounter.incrementAndGet()}").apply {
+            isDaemon = true
+            priority = Thread.MIN_PRIORITY + 1
+        }
+    }
+
+    private fun normalize(source: Path): Path = source.toAbsolutePath().normalize()
 
     fun acquire(source: Path): RocketFuelFile? {
-        if (converting.contains(source)) {
-            dev.henny.rocketload.client.ReloadDebug.log("fuel miss (converting): {}", source.fileName)
+        val key = normalize(source)
+        if (key in converting) {
+            ReloadDebug.log("fuel miss (converting): {}", key.fileName)
             return null
         }
         return try {
             val t0 = System.nanoTime()
-            val attrs = Files.readAttributes(source, BasicFileAttributes::class.java)
+            val attrs = Files.readAttributes(key, BasicFileAttributes::class.java)
             synchronized(this) {
-                val existing = open[source]
-                if (existing != null && isValidFor(existing.fuel, attrs)) {
-                    existing.refs.incrementAndGet()
-                    dev.henny.rocketload.client.ReloadDebug.log(
-                        "fuel hit open: {} refs={} ({} ms)",
-                        source.fileName,
-                        existing.refs.get(),
-                        (System.nanoTime() - t0) / 1_000_000,
-                    )
-                    return existing.fuel
+                val existing = byPath[key]
+                if (existing != null) {
+                    if (isValidFor(existing.fuel, attrs)) {
+                        existing.refs++
+                        ReloadDebug.log("fuel hit open: {} refs={}", key.fileName, existing.refs)
+                        return existing.fuel
+                    }
+                    byPath.remove(key)
+                    if (existing.refs <= 0) closeHolder(existing)
                 }
-                existing?.fuel?.close()
-                open.remove(source)
             }
-            if (!isDiskCacheValid(cacheDir.resolve(cacheFileName(source)), attrs)) {
-                dev.henny.rocketload.client.ReloadDebug.log("fuel miss disk: {} ({} ms)", source.fileName, (System.nanoTime() - t0) / 1_000_000)
+            val target = cacheFile(key, attrs)
+            if (!isDiskCacheValid(target, attrs)) {
+                ReloadDebug.log("fuel miss disk: {}", key.fileName)
                 return null
             }
-            val fuel = RocketFuelFile.open(cacheDir.resolve(cacheFileName(source)))
+            val fuel = RocketFuelFile.open(target)
             synchronized(this) {
-                val existing = open[source]
+                val existing = byPath[key]
                 if (existing != null && isValidFor(existing.fuel, attrs)) {
                     fuel.close()
-                    existing.refs.incrementAndGet()
+                    existing.refs++
                     return existing.fuel
                 }
-                existing?.fuel?.close()
-                open[source] = Holder(fuel).also { it.refs.set(1) }
-                logger.info(
-                    "[RocketLoad] {} Index geladen ({} Eintraege, kein Full-MMap, {} offen)",
-                    source.fileName,
-                    fuel.entries.size,
-                    open.size,
-                )
-                dev.henny.rocketload.client.ReloadDebug.log(
+                val holder = Holder(key, fuel).also { it.refs = 1 }
+                byPath[key] = holder
+                byFuel[fuel] = holder
+                ReloadDebug.log(
                     "fuel index {} entries={} {} ms open={}",
-                    source.fileName,
-                    fuel.entries.size,
-                    (System.nanoTime() - t0) / 1_000_000,
-                    open.size,
+                    key.fileName, fuel.entries.size, (System.nanoTime() - t0) / 1_000_000, byPath.size,
                 )
                 fuel
             }
         } catch (e: IOException) {
-            logger.warn("[RocketLoad] Cache fuer {} nicht nutzbar, Fallback auf Vanilla: {}", source, e.toString())
+            logger.warn("[RocketLoad] Cache fuer {} nicht nutzbar, Fallback auf Vanilla: {}", key.fileName, e.toString())
             null
         }
     }
 
     fun release(fuel: RocketFuelFile) {
         synchronized(this) {
-            val found = open.entries.firstOrNull { it.value.fuel === fuel }
-            if (found == null) {
-                try {
-                    fuel.close()
-                } catch (_: Exception) {
-                }
+            val holder = byFuel[fuel]
+            if (holder == null) {
+                runCatching { fuel.close() }
                 return
             }
-            if (found.value.refs.decrementAndGet() > 0) return
-            open.remove(found.key)
-            try {
-                found.value.fuel.close()
-            } catch (e: Exception) {
-                logger.warn("[RocketLoad] Fuel-Close fehlgeschlagen: {}", e.toString())
-            }
-            logger.info("[RocketLoad] {} aus RAM genommen ({} bleiben offen)", found.key.fileName, open.size)
+            if (--holder.refs > 0) return
+            if (byPath[holder.key] === holder) byPath.remove(holder.key)
+            closeHolder(holder)
         }
     }
 
-    fun scheduleConvert(source: Path, onDone: ((converted: Boolean) -> Unit)? = null) {
-        if (!converting.add(source)) return
+    private fun closeHolder(holder: Holder) {
+        byFuel.remove(holder.fuel)
+        try {
+            holder.fuel.close()
+        } catch (e: Exception) {
+            logger.warn("[RocketLoad] Fuel-Close fehlgeschlagen: {}", e.toString())
+        }
+    }
+
+    fun scheduleConvert(source: Path) {
+        val key = normalize(source)
+        if (!converting.add(key)) return
         executor.execute {
             try {
-                val converted = convertOnWorker(source)
-                onDone?.invoke(converted)
+                convertOnWorker(key)
             } catch (e: Exception) {
-                logger.warn("[RocketLoad] Konvertierung von {} fehlgeschlagen: {}", source, e.toString())
-                onDone?.invoke(false)
+                logger.warn("[RocketLoad] Konvertierung von {} fehlgeschlagen: {}", key.fileName, e.toString())
             } finally {
-                converting.remove(source)
+                converting.remove(key)
             }
         }
     }
 
-    fun preconvertAll(dir: Path, onFinished: (converted: Int, ms: Long) -> Unit) {
-        optimizeAll(dir, null, onFinished)
+    fun cachedFile(source: Path): Path? {
+        val key = normalize(source)
+        return try {
+            val attrs = Files.readAttributes(key, BasicFileAttributes::class.java)
+            cacheFile(key, attrs).takeIf { isDiskCacheValid(it, attrs) }
+        } catch (_: IOException) {
+            null
+        }
+    }
+
+    fun convertAsync(source: Path): CompletableFuture<Path> {
+        val key = normalize(source)
+        val result = CompletableFuture<Path>()
+        executor.execute {
+            val added = converting.add(key)
+            try {
+                convertOnWorker(key)
+                val file = cachedFile(key) ?: throw IOException("Konvertierung lieferte keinen gueltigen Cache: ${key.fileName}")
+                result.complete(file)
+            } catch (t: Throwable) {
+                result.completeExceptionally(t)
+            } finally {
+                if (added) converting.remove(key)
+            }
+        }
+        return result
     }
 
     fun optimizeAll(dir: Path, onProgress: ((done: Int, total: Int) -> Unit)?, onFinished: (converted: Int, ms: Long) -> Unit) {
         executor.execute {
             val start = System.nanoTime()
             val zips = collectZips(dir)
-            if (zips.isEmpty()) {
-                onFinished(0, (System.nanoTime() - start) / 1_000_000)
-                return@execute
-            }
             var converted = 0
             zips.forEachIndexed { index, zip ->
-                try {
-                    if (convertOnWorker(zip)) converted++
-                } catch (e: Exception) {
-                    logger.warn("[RocketLoad] Konvertierung von {} fehlgeschlagen: {}", zip, e.toString())
+                val key = normalize(zip)
+                if (converting.add(key)) {
+                    try {
+                        if (convertOnWorker(key)) converted++
+                    } catch (e: Exception) {
+                        logger.warn("[RocketLoad] Konvertierung von {} fehlgeschlagen: {}", zip.fileName, e.toString())
+                    } finally {
+                        converting.remove(key)
+                    }
                 }
                 onProgress?.invoke(index + 1, zips.size)
             }
@@ -155,31 +191,20 @@ object RocketFuelCache {
     }
 
     fun collectZips(dir: Path): List<Path> {
+        if (!Files.isDirectory(dir)) return emptyList()
         val out = ArrayList<Path>()
-        collectZips(dir, 0, out)
-        return out
-    }
-
-    private fun collectZips(dir: Path, depth: Int, out: MutableList<Path>) {
-        if (depth > 8 || !Files.isDirectory(dir)) return
         try {
             Files.newDirectoryStream(dir).use { stream ->
                 for (child in stream) {
                     val name = child.fileName.toString()
                     if (name.startsWith(".")) continue
-                    try {
-                        if (Files.isRegularFile(child) && name.endsWith(".zip", ignoreCase = true)) {
-                            out.add(child)
-                        } else if (Files.isDirectory(child) && !Files.isRegularFile(child.resolve("pack.mcmeta"))) {
-                            collectZips(child, depth + 1, out)
-                        }
-                    } catch (_: Exception) {
-                    }
+                    if (name.endsWith(".zip", ignoreCase = true) && Files.isRegularFile(child)) out.add(child)
                 }
             }
         } catch (e: IOException) {
             logger.warn("[RocketLoad] Pack-Scan fehlgeschlagen: {}", e.toString())
         }
+        return out
     }
 
     fun housekeeping(retentionDays: Int) {
@@ -190,20 +215,20 @@ object RocketFuelCache {
                 var deleted = 0
                 val cutoff = System.currentTimeMillis() - retentionDays.toLong() * 24 * 60 * 60 * 1000
                 Files.list(cacheDir).use { stream ->
-                    stream.filter { it.fileName.toString().endsWith(RocketFuelFormat.FILE_EXTENSION) }
-                        .forEach { file ->
-                            if (retentionDays > 0 && Files.getLastModifiedTime(file).toMillis() < cutoff) {
-                                try {
-                                    Files.delete(file)
-                                    deleted++
-                                    return@forEach
-                                } catch (e: IOException) {
-                                    logger.warn("[RocketLoad] Konnte {} nicht aufraeumen: {}", file.fileName, e.toString())
-                                }
-                            }
-                            files++
-                            bytes += Files.size(file)
+                    for (file in stream.toList()) {
+                        val name = file.fileName.toString()
+                        if (!Files.isRegularFile(file)) continue
+                        val isTmp = name.endsWith(".tmp")
+                        val isFuel = name.endsWith(RocketFuelFormat.FILE_EXTENSION)
+                        if (!isTmp && !isFuel) continue
+                        val stale = isTmp || (retentionDays > 0 && Files.getLastModifiedTime(file).toMillis() < cutoff)
+                        if (stale && tryDelete(file)) {
+                            deleted++
+                            continue
                         }
+                        files++
+                        bytes += Files.size(file)
+                    }
                 }
                 logger.info(
                     "[RocketLoad] Cache: {} Datei(en), {} MiB{}",
@@ -216,22 +241,56 @@ object RocketFuelCache {
         }
     }
 
-    private fun convertOnWorker(source: Path): Boolean {
-        val attrs = Files.readAttributes(source, BasicFileAttributes::class.java)
-        val target = cacheDir.resolve(cacheFileName(source))
+    private fun tryDelete(file: Path): Boolean = try {
+        Files.deleteIfExists(file)
+    } catch (_: IOException) {
+        false
+    }
+
+    private fun writerOptions(): RocketFuelWriter.Options {
+        val config = RocketLoadConfig.instance
+        return RocketFuelWriter.Options(
+            jsonMinify = config.jsonMinify,
+            deduplicate = config.deduplicate,
+            optimizeTextures = config.optimizeTextures,
+            pngCompressionLevel = config.pngCompressionLevel,
+        )
+    }
+
+    private fun convertOnWorker(key: Path): Boolean {
+        val attrs = Files.readAttributes(key, BasicFileAttributes::class.java)
         synchronized(this) {
-            if (open.containsKey(source)) return false
+            val open = byPath[key]
+            if (open != null && isValidFor(open.fuel, attrs)) return false
         }
+        val target = cacheFile(key, attrs)
         if (isDiskCacheValid(target, attrs)) return false
         val start = System.nanoTime()
-        val stats = RocketFuelWriter.convert(source, target)
-        val ms = (System.nanoTime() - start) / 1_000_000
+        val stats = RocketFuelWriter.convert(key, target, writerOptions(), workers)
+        removeOutdatedSiblings(key, target)
+        RocketLoadApiImpl.firePackConverted(key, target)
         logger.info(
-            "[RocketLoad] {} konvertiert: {} Eintraege, {} ms | {} Junk-Dateien entfernt, {} KiB JSON gespart, {} KiB PNG gespart, {} KiB dedupliziert (nicht im RAM gehalten)",
-            source.fileName, stats.entries, ms,
-            stats.junkSkipped, stats.jsonBytesSaved / 1024, stats.pngBytesSaved / 1024, stats.dedupedBytes / 1024,
+            "[RocketLoad] {} konvertiert: {} Eintraege, {} ms | {} Junk-Dateien entfernt, {} KiB JSON gespart, {} KiB PNG gespart, {} KiB dedupliziert",
+            key.fileName, stats.entries.get(), (System.nanoTime() - start) / 1_000_000,
+            stats.junkSkipped.get(), stats.jsonBytesSaved.get() / 1024, stats.pngBytesSaved.get() / 1024,
+            stats.dedupedBytes.get() / 1024,
         )
         return true
+    }
+
+    private fun removeOutdatedSiblings(key: Path, current: Path) {
+        val prefix = cachePrefix(key)
+        val openFiles = synchronized(this) { byFuel.keys.map { it.path.toAbsolutePath().normalize() }.toSet() }
+        try {
+            Files.newDirectoryStream(cacheDir, "$prefix*${RocketFuelFormat.FILE_EXTENSION}").use { stream ->
+                for (file in stream) {
+                    if (file == current) continue
+                    if (file.toAbsolutePath().normalize() in openFiles) continue
+                    tryDelete(file)
+                }
+            }
+        } catch (_: IOException) {
+        }
     }
 
     private fun isValidFor(fuel: RocketFuelFile, attrs: BasicFileAttributes): Boolean =
@@ -247,7 +306,10 @@ object RocketFuelCache {
                 header.sourceMtime == attrs.lastModifiedTime().toMillis() &&
                 header.writerVersion == RocketFuelFormat.WRITER_VERSION
             if (valid) {
-                Files.setLastModifiedTime(target, FileTime.fromMillis(System.currentTimeMillis()))
+                val now = System.currentTimeMillis()
+                if (now - Files.getLastModifiedTime(target).toMillis() > TOUCH_INTERVAL_MS) {
+                    Files.setLastModifiedTime(target, FileTime.fromMillis(now))
+                }
             }
             valid
         } catch (e: IOException) {
@@ -256,14 +318,21 @@ object RocketFuelCache {
         }
     }
 
-    private fun cacheFileName(source: Path): String {
-        val digest = MessageDigest.getInstance("SHA-256")
-        digest.update(source.toAbsolutePath().toString().toByteArray(Charsets.UTF_8))
-        val hash = digest.digest().joinToString("") { "%02x".format(it) }.take(16)
-        val baseName = source.fileName.toString()
+    private fun sha(text: String, length: Int): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(text.toByteArray(Charsets.UTF_8))
+        return digest.joinToString("") { "%02x".format(it) }.take(length)
+    }
+
+    private fun cachePrefix(key: Path): String {
+        val baseName = key.fileName.toString()
             .removeSuffix(".zip")
             .replace(Regex("[^A-Za-z0-9._-]"), "_")
             .take(64)
-        return "$baseName-$hash${RocketFuelFormat.FILE_EXTENSION}"
+        return "$baseName-${sha(key.toString(), 16)}-"
+    }
+
+    private fun cacheFile(key: Path, attrs: BasicFileAttributes): Path {
+        val stamp = sha("${attrs.size()}:${attrs.lastModifiedTime().toMillis()}:${RocketFuelFormat.WRITER_VERSION}", 8)
+        return cacheDir.resolve("${cachePrefix(key)}$stamp${RocketFuelFormat.FILE_EXTENSION}")
     }
 }
