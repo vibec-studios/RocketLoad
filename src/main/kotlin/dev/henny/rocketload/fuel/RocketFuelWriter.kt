@@ -58,9 +58,15 @@ object RocketFuelWriter {
             path.substringAfterLast('/') in JUNK_FILE_NAMES
 
     @Throws(IOException::class)
-    fun convert(source: Path, target: Path, options: Options = Options(), workers: ExecutorService? = null): Stats {
+    fun convert(
+        source: Path,
+        target: Path,
+        options: Options = Options(),
+        workers: ExecutorService? = null,
+        sourceMtime: Long? = null,
+    ): Stats {
         val attrs = Files.readAttributes(source, BasicFileAttributes::class.java)
-        return write(target, attrs.size(), attrs.lastModifiedTime().toMillis(), options, workers) { sink ->
+        return write(target, attrs.size(), sourceMtime ?: attrs.lastModifiedTime().toMillis(), options, workers) { sink ->
             if (Files.isDirectory(source)) feedDirectory(source, sink) else feedZip(source, sink)
         }
     }

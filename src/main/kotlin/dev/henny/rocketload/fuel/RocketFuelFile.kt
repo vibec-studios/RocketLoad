@@ -1,5 +1,6 @@
 package dev.henny.rocketload.fuel
 
+import com.google.gson.JsonParser
 import java.io.IOException
 import java.io.InputStream
 import java.nio.ByteBuffer
@@ -202,6 +203,14 @@ class RocketFuelFile private constructor(
                 }
             }
 
+            fun noteMetadata(bytes: ByteArray) {
+                if (opaque) return
+                opaque = bytes.size > MAX_META_SCAN || runCatching {
+                    val metadata = JsonParser.parseString(String(bytes, Charsets.UTF_8)).asJsonObject
+                    metadata.has("filter") || metadata.has("overlays")
+                }.getOrDefault(true)
+            }
+
             fun build() = Domains(
                 sounds, texts, colormaps, lang, fonts, shaders,
                 textures, models, blockModels, atlases, particles, unknown, opaque,
@@ -246,10 +255,12 @@ class RocketFuelFile private constructor(
                     domains.note(entryPath)
                 }
                 entries["pack.mcmeta"]?.let { meta ->
-                    if (meta.size in 1..MAX_META_SCAN) {
+                    if (meta.size > MAX_META_SCAN) {
+                        domains.opaque = true
+                    } else if (!domains.opaque) {
                         val metaBuf = ByteBuffer.allocate(meta.size)
                         readFully(channel, metaBuf, meta.offset, path)
-                        if (String(metaBuf.array(), Charsets.UTF_8).contains("\"filter\"")) domains.opaque = true
+                        domains.noteMetadata(metaBuf.array())
                     }
                 }
 
@@ -264,7 +275,7 @@ class RocketFuelFile private constructor(
             }
         }
 
-        private const val MAX_META_SCAN = 256 * 1024
+        internal const val MAX_META_SCAN = 256 * 1024
 
         private fun readFully(channel: FileChannel, buf: ByteBuffer, start: Long, path: Path) {
             var pos = start

@@ -5,6 +5,7 @@ import dev.henny.rocketload.api.impl.RocketLoadApiImpl
 import dev.henny.rocketload.mixin.LoadingOverlayAccessor
 import net.minecraft.client.Minecraft
 import net.minecraft.client.gui.components.toasts.SystemToast
+import net.minecraft.client.gui.screens.ConnectScreen
 import net.minecraft.client.gui.screens.LoadingOverlay
 import net.minecraft.client.gui.screens.Overlay
 import net.minecraft.network.chat.Component
@@ -22,6 +23,7 @@ object BackgroundReloadDriver {
     private val TOAST_ID = SystemToast.SystemToastId(5000L)
     private const val RAMP_START_MS = 1500L
     private const val RAMP_END_MS = 6000L
+    private const val CONNECT_BUDGET_NANOS = 40_000_000L
     private const val MAX_BUDGET_NANOS = 40_000_000L
     private const val UNFOCUSED_BUDGET_NANOS = 250_000_000L
 
@@ -49,9 +51,12 @@ object BackgroundReloadDriver {
     @JvmStatic
     fun frameDeadline(): Long = frameDeadline
 
+    private fun isConnecting(mc: Minecraft): Boolean = mc.level == null && McCompat.screen(mc) is ConnectScreen
+
     private fun budgetNanos(mc: Minecraft?): Long {
-        val base = RocketLoadConfig.instance.applyBudgetMsPerTick.coerceIn(1, 50) * 1_000_000L
         if (mc != null && !mc.isWindowActive) return UNFOCUSED_BUDGET_NANOS
+        val configured = RocketLoadConfig.instance.applyBudgetMsPerTick.coerceIn(1, 50) * 1_000_000L
+        val base = if (mc != null && isConnecting(mc)) maxOf(configured, CONNECT_BUDGET_NANOS) else configured
         val state = active ?: return base
         val elapsedMs = (System.nanoTime() - state.startNanos) / 1_000_000
         if (elapsedMs < RAMP_START_MS) return base
@@ -84,12 +89,7 @@ object BackgroundReloadDriver {
 
     @JvmStatic
     fun interceptReloadRequest(mc: Minecraft, isRecovery: Boolean): CompletableFuture<Void>? {
-        if (isRecovery || startingNow) {
-            ReloadSkips.beginReload()
-            return null
-        }
-        if (!RocketLoadConfig.instance.backgroundReload) {
-            ReloadSkips.beginReload()
+        if (isRecovery || startingNow || !RocketLoadConfig.instance.backgroundReload) {
             return null
         }
         deferredStart?.let { return it }
@@ -99,13 +99,13 @@ object BackgroundReloadDriver {
                 ReloadDebug.log("reload requested while active - follow-up queued")
             }
         }
-        return deferStart(mc, 2)
+        return deferStart(mc)
     }
 
-    private fun deferStart(mc: Minecraft, frames: Int): CompletableFuture<Void> {
+    private fun deferStart(mc: Minecraft): CompletableFuture<Void> {
         val future = CompletableFuture<Void>()
         deferredStart = future
-        framesUntilStart = frames
+        framesUntilStart = if (isConnecting(mc)) 0 else 1
         lastToastPercent = -1
         showToast(mc, Component.translatable("rocketload.toast.applying", 0))
         return future
@@ -161,11 +161,11 @@ object BackgroundReloadDriver {
             return
         }
 
-        pumping = true
         val pumpStart = System.nanoTime()
+        val deadline = pumpStart + budgetNanos(Minecraft.getInstance())
+        pumping = true
         var ran = 0
         try {
-            val deadline = pumpStart + budgetNanos(Minecraft.getInstance())
             frameDeadline = deadline
             while (true) {
                 val task = applyQueue.poll() ?: break
@@ -180,6 +180,9 @@ object BackgroundReloadDriver {
         } finally {
             pumping = false
             ReloadDebug.pumpFrame(ran, (System.nanoTime() - pumpStart) / 1_000_000, applyQueue.size)
+        }
+        if (applyQueue.isEmpty() && System.nanoTime() < deadline) {
+            drainFinish()
         }
     }
 
@@ -254,7 +257,7 @@ object BackgroundReloadDriver {
         if (next != null) {
             followUp = null
             if (deferredStart == null) {
-                val started = deferStart(mc, 1)
+                val started = deferStart(mc)
                 started.whenComplete { _, error -> if (error != null) next.completeExceptionally(error) else next.complete(null) }
             } else {
                 deferredStart!!.whenComplete { _, error -> if (error != null) next.completeExceptionally(error) else next.complete(null) }

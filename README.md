@@ -25,6 +25,7 @@ Zip-Packs werden beim Spielstart im Hintergrund einmalig konvertiert:
 Manuelle Reloads (F3+T, Pack-Screen, Server-Packs) zeigen keinen Mojang-Splash: Das Spiel rendert weiter, ein Toast zeigt den Fortschritt, die Apply-Arbeit wird mit Zeitbudget über mehrere Frames verteilt.
 
 - Wird während eines laufenden Reloads ein weiterer angefordert (z. B. Server-Pack kommt rein), läuft danach **automatisch ein Folge-Reload** – nichts geht verloren
+- Beim Serverbeitritt startet der Pack-Reload früher und bekommt mehr Zeit pro Frame, solange noch keine Welt geladen ist. RocketLoad erkennt die betroffenen Bereiche verifizierter Server-Packs bereits im ZIP und erkennt denselben Inhalt später auch im `.rocketfuel`-Cache wieder.
 - Atlas-Uploads werden **vorab** über mehrere Frames auf die GPU geladen; das Umschalten auf die neuen Texturen passiert in einem einzigen Frame → kein Textur-Flackern
 - Die Singleplayer-Welt pausiert während des Reloads – **nicht** bei LAN-Welten mit Mitspielern
 - Der Recovery-Pfad (kaputtes Pack → Rollback) behält bewusst das Vanilla-Verhalten

@@ -39,8 +39,10 @@ object ChunkRebuildGuard {
     }
 
     private fun decide(mc: Minecraft) {
-        val blocks = AtlasLayouts.blocksLayout(mc)
-        val sameBlocks = lastBlocks != null && blocks != null && lastBlocks == blocks
+        val previousBlocks = lastBlocks
+        val visualsSkipped = ReloadSkips.decision(ReloadDomain.VISUALS) == true
+        val blocks = if (visualsSkipped && previousBlocks != null) previousBlocks else AtlasLayouts.blocksLayout(mc)
+        val sameBlocks = blocks != null && previousBlocks == blocks
         lastBlocks = blocks
         val config = RocketLoadConfig.instance
         if (!config.chunkRebuildGuard || (ReloadSkips.packSetChanged() && !config.selectivePackSetReload)) {
@@ -48,7 +50,6 @@ object ChunkRebuildGuard {
             return
         }
         val geometrySame = ReloadSkips.geometryUnchanged(mc.resourceManager)
-        val visualsSkipped = ReloadSkips.decision(ReloadDomain.VISUALS) == true
         val colormapsSkipped = ReloadSkips.decision(ReloadDomain.COLORMAPS) != false
         ReloadDebug.log("chunk-guard sameBlocks={} geometrySame={} visualsSkipped={} colormapsSkipped={}", sameBlocks, geometrySame, visualsSkipped, colormapsSkipped)
         if (geometrySame && colormapsSkipped && (visualsSkipped || sameBlocks)) {

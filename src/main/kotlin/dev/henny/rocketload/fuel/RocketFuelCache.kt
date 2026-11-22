@@ -21,6 +21,10 @@ import java.util.concurrent.atomic.AtomicInteger
 object RocketFuelCache {
     private val logger = LoggerFactory.getLogger("RocketLoad")
     private const val TOUCH_INTERVAL_MS = 6L * 60 * 60 * 1000
+    private const val VERIFIED_DOWNLOAD_MTIME = Long.MIN_VALUE
+    private val downloadHash = Regex("[0-9a-f]{40}")
+
+    private data class SourceStamp(val size: Long, val mtime: Long)
 
     private class Holder(val key: Path, val fuel: RocketFuelFile) {
         var refs = 0
@@ -32,6 +36,8 @@ object RocketFuelCache {
         dir
     }
 
+    private val downloadDir: Path by lazy { normalize(FabricLoader.getInstance().gameDir.resolve("downloads")) }
+    private val verifiedDownloads = ConcurrentHashMap<Path, BasicFileAttributes>()
     private val byPath = HashMap<Path, Holder>()
     private val byFuel = IdentityHashMap<RocketFuelFile, Holder>()
     private val converting = ConcurrentHashMap.newKeySet<Path>()
@@ -55,6 +61,41 @@ object RocketFuelCache {
 
     private fun normalize(source: Path): Path = source.toAbsolutePath().normalize()
 
+    fun registerVerifiedDownload(source: Path) {
+        val key = normalize(source)
+        if (!downloadHash.matches(key.fileName.toString()) || key.parent?.parent != downloadDir) return
+        try {
+            verifiedDownloads[key] = Files.readAttributes(key, BasicFileAttributes::class.java)
+        } catch (_: IOException) {
+            verifiedDownloads.remove(key)
+        }
+    }
+
+    private fun isVerified(key: Path, attrs: BasicFileAttributes): Boolean {
+        val verified = verifiedDownloads[key] ?: return false
+        // Minecraft touches cached downloads after verifying their content. The hash in the path
+        // identifies the bytes that were verified, while the attributes detect subsequent edits.
+        return attrs.size() == verified.size() &&
+            attrs.lastModifiedTime() == verified.lastModifiedTime() && attrs.fileKey() == verified.fileKey()
+    }
+
+    internal fun verifiedDownloadId(source: Path): String? {
+        val key = normalize(source)
+        if (!verifiedDownloads.containsKey(key)) return null
+        return try {
+            val attrs = Files.readAttributes(key, BasicFileAttributes::class.java)
+            key.fileName.toString().takeIf { isVerified(key, attrs) }
+        } catch (_: IOException) {
+            null
+        }
+    }
+
+    private fun sourceStamp(key: Path): SourceStamp {
+        val attrs = Files.readAttributes(key, BasicFileAttributes::class.java)
+        val mtime = if (isVerified(key, attrs)) VERIFIED_DOWNLOAD_MTIME else attrs.lastModifiedTime().toMillis()
+        return SourceStamp(attrs.size(), mtime)
+    }
+
     fun acquire(source: Path): RocketFuelFile? {
         val key = normalize(source)
         if (key in converting) {
@@ -63,11 +104,11 @@ object RocketFuelCache {
         }
         return try {
             val t0 = System.nanoTime()
-            val attrs = Files.readAttributes(key, BasicFileAttributes::class.java)
+            val stamp = sourceStamp(key)
             synchronized(this) {
                 val existing = byPath[key]
                 if (existing != null) {
-                    if (isValidFor(existing.fuel, attrs)) {
+                    if (isValidFor(existing.fuel, stamp)) {
                         existing.refs++
                         ReloadDebug.log("fuel hit open: {} refs={}", key.fileName, existing.refs)
                         return existing.fuel
@@ -76,15 +117,15 @@ object RocketFuelCache {
                     if (existing.refs <= 0) closeHolder(existing)
                 }
             }
-            val target = cacheFile(key, attrs)
-            if (!isDiskCacheValid(target, attrs)) {
+            val target = cacheFile(key, stamp)
+            if (!isDiskCacheValid(target, stamp)) {
                 ReloadDebug.log("fuel miss disk: {}", key.fileName)
                 return null
             }
             val fuel = RocketFuelFile.open(target)
             synchronized(this) {
                 val existing = byPath[key]
-                if (existing != null && isValidFor(existing.fuel, attrs)) {
+                if (existing != null && isValidFor(existing.fuel, stamp)) {
                     fuel.close()
                     existing.refs++
                     return existing.fuel
@@ -143,8 +184,8 @@ object RocketFuelCache {
     fun cachedFile(source: Path): Path? {
         val key = normalize(source)
         return try {
-            val attrs = Files.readAttributes(key, BasicFileAttributes::class.java)
-            cacheFile(key, attrs).takeIf { isDiskCacheValid(it, attrs) }
+            val stamp = sourceStamp(key)
+            cacheFile(key, stamp).takeIf { isDiskCacheValid(it, stamp) }
         } catch (_: IOException) {
             null
         }
@@ -258,15 +299,26 @@ object RocketFuelCache {
     }
 
     private fun convertOnWorker(key: Path): Boolean {
-        val attrs = Files.readAttributes(key, BasicFileAttributes::class.java)
+        val stamp = sourceStamp(key)
         synchronized(this) {
             val open = byPath[key]
-            if (open != null && isValidFor(open.fuel, attrs)) return false
+            if (open != null && isValidFor(open.fuel, stamp)) return false
         }
-        val target = cacheFile(key, attrs)
-        if (isDiskCacheValid(target, attrs)) return false
+        val target = cacheFile(key, stamp)
+        if (isDiskCacheValid(target, stamp)) return false
         val start = System.nanoTime()
-        val stats = RocketFuelWriter.convert(key, target, writerOptions(), workers)
+        val stats = RocketFuelWriter.convert(key, target, writerOptions(), workers, sourceMtime = stamp.mtime)
+        if (stamp.mtime == VERIFIED_DOWNLOAD_MTIME) {
+            val current = try {
+                sourceStamp(key)
+            } catch (_: IOException) {
+                null
+            }
+            if (current != stamp) {
+                Files.deleteIfExists(target)
+                return false
+            }
+        }
         removeOutdatedSiblings(key, target)
         RocketLoadApiImpl.firePackConverted(key, target)
         logger.info(
@@ -293,17 +345,17 @@ object RocketFuelCache {
         }
     }
 
-    private fun isValidFor(fuel: RocketFuelFile, attrs: BasicFileAttributes): Boolean =
-        fuel.sourceSize == attrs.size() &&
-            fuel.sourceMtime == attrs.lastModifiedTime().toMillis() &&
+    private fun isValidFor(fuel: RocketFuelFile, stamp: SourceStamp): Boolean =
+        fuel.sourceSize == stamp.size &&
+            fuel.sourceMtime == stamp.mtime &&
             fuel.writerVersion == RocketFuelFormat.WRITER_VERSION
 
-    private fun isDiskCacheValid(target: Path, attrs: BasicFileAttributes): Boolean {
+    private fun isDiskCacheValid(target: Path, stamp: SourceStamp): Boolean {
         if (!Files.isRegularFile(target)) return false
         return try {
             val header = RocketFuelFile.readHeader(target)
-            val valid = header.sourceSize == attrs.size() &&
-                header.sourceMtime == attrs.lastModifiedTime().toMillis() &&
+            val valid = header.sourceSize == stamp.size &&
+                header.sourceMtime == stamp.mtime &&
                 header.writerVersion == RocketFuelFormat.WRITER_VERSION
             if (valid) {
                 val now = System.currentTimeMillis()
@@ -331,8 +383,8 @@ object RocketFuelCache {
         return "$baseName-${sha(key.toString(), 16)}-"
     }
 
-    private fun cacheFile(key: Path, attrs: BasicFileAttributes): Path {
-        val stamp = sha("${attrs.size()}:${attrs.lastModifiedTime().toMillis()}:${RocketFuelFormat.WRITER_VERSION}", 8)
-        return cacheDir.resolve("${cachePrefix(key)}$stamp${RocketFuelFormat.FILE_EXTENSION}")
+    private fun cacheFile(key: Path, stamp: SourceStamp): Path {
+        val versioned = sha("${stamp.size}:${stamp.mtime}:${RocketFuelFormat.WRITER_VERSION}", 8)
+        return cacheDir.resolve("${cachePrefix(key)}$versioned${RocketFuelFormat.FILE_EXTENSION}")
     }
 }

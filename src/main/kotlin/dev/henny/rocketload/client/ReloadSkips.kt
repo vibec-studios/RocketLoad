@@ -11,6 +11,7 @@ import net.minecraft.client.resources.FoliageColorReloadListener
 import net.minecraft.client.resources.GrassColorReloadListener
 import net.minecraft.client.resources.SplashManager
 import net.minecraft.client.sounds.SoundManager
+import net.minecraft.server.packs.PackResources
 import net.minecraft.server.packs.resources.ResourceManager
 import org.slf4j.LoggerFactory
 import java.util.concurrent.ConcurrentHashMap
@@ -22,7 +23,10 @@ object ReloadSkips {
         val id: ReloadDomain,
         val relevant: (RocketFuelFile.Domains) -> Boolean,
         val extraState: () -> String = { "" },
-    )
+    ) {
+        fun fingerprint(packs: List<ResourceFingerprints.PackFingerprint>): List<String> =
+            ResourceFingerprints.fingerprint(packs, id == ReloadDomain.SOUNDS, relevant) + extraState()
+    }
 
     private fun mipmaps(): String = Minecraft.getInstance()?.options?.mipmapLevels()?.get()?.toString() ?: ""
 
@@ -30,7 +34,7 @@ object ReloadSkips {
     private val SPLASHES = Domain(ReloadDomain.SPLASH_TEXTS, { it.texts })
     private val COLORMAPS = Domain(ReloadDomain.COLORMAPS, { it.colormaps })
     private val LANGUAGE = Domain(ReloadDomain.LANGUAGE, { it.lang }, { Minecraft.getInstance()?.languageManager?.selected ?: "" })
-    private val FONTS = Domain(ReloadDomain.FONTS, { it.fonts })
+    private val FONTS = Domain(ReloadDomain.FONTS, { it.fonts || it.textures })
     private val SHADERS = Domain(ReloadDomain.SHADERS, { it.shaders })
     private val TEXTURES = Domain(ReloadDomain.TEXTURES, { it.textures })
     private val VISUALS = Domain(ReloadDomain.VISUALS, { it.visuals }, ::mipmaps)
@@ -48,10 +52,10 @@ object ReloadSkips {
 
     private val lastFingerprints = ConcurrentHashMap<ReloadDomain, List<String>>()
 
-    // Like lastFingerprints, but packs with overlays/filters always count. Used when the pack
-    // set changed, because path-based domain detection can't see what those packs hide.
-    private val lastOpaqueFingerprints = ConcurrentHashMap<ReloadDomain, List<String>>()
     private val decisions = ConcurrentHashMap<ReloadDomain, Boolean>()
+
+    @Volatile
+    private var currentPacks: Lazy<List<ResourceFingerprints.PackFingerprint>>? = null
 
     private var lastSelectedIds: List<String>? = null
 
@@ -65,7 +69,8 @@ object ReloadSkips {
     fun decision(domain: ReloadDomain): Boolean? = decisions[domain]
 
     @JvmStatic
-    fun beginReload() {
+    fun beginReload(packs: List<PackResources>) {
+        currentPacks = lazy { ResourceFingerprints.snapshot(packs) }
         decisions.clear()
         ReloadDebug.beginReload()
         val ids = Minecraft.getInstance()?.resourcePackRepository?.selectedIds?.toList()
@@ -82,12 +87,15 @@ object ReloadSkips {
 
     @JvmStatic
     fun capture(manager: ResourceManager) {
-        val packs = manager.listPacks().toList()
+        val packs = try {
+            ResourceFingerprints.snapshot(manager.listPacks().toList())
+        } catch (e: Exception) {
+            logger.warn("[RocketLoad] Pack-Fingerprints konnten nicht erfasst werden: {}", e.toString())
+            return
+        }
         for (domain in ALL) {
             try {
-                lastFingerprints[domain.id] = ResourceFingerprints.fingerprint(packs, domain.relevant) + domain.extraState()
-                lastOpaqueFingerprints[domain.id] =
-                    ResourceFingerprints.fingerprint(packs, domain.relevant, includeOpaque = true) + domain.extraState()
+                lastFingerprints[domain.id] = domain.fingerprint(packs)
             } catch (_: Exception) {
             }
         }
@@ -137,19 +145,10 @@ object ReloadSkips {
 
     private fun evaluate(domain: Domain, manager: ResourceManager): Boolean {
         return try {
-            val packs = manager.listPacks().toList()
-            val fingerprint = ResourceFingerprints.fingerprint(packs, domain.relevant) + domain.extraState()
-            val opaqueFingerprint =
-                ResourceFingerprints.fingerprint(packs, domain.relevant, includeOpaque = true) + domain.extraState()
+            val packs = currentPacks?.value ?: ResourceFingerprints.snapshot(manager.listPacks().toList())
+            val fingerprint = domain.fingerprint(packs)
             val last = lastFingerprints.put(domain.id, fingerprint)
-            val lastOpaque = lastOpaqueFingerprints.put(domain.id, opaqueFingerprint)
-            val same = when {
-                !packSetChanged -> last != null && last == fingerprint
-                // Pack set changed: skip only if no pack touching this domain was added, removed
-                // or reordered. Packs without a .rocketfuel index always count as touching.
-                RocketLoadConfig.instance.selectivePackSetReload -> lastOpaque != null && lastOpaque == opaqueFingerprint
-                else -> false
-            }
+            val same = last == fingerprint && (!packSetChanged || RocketLoadConfig.instance.selectivePackSetReload)
             ReloadDebug.skip(domain.id.label, same, last, fingerprint)
             same
         } catch (e: Exception) {

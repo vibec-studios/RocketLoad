@@ -1,6 +1,7 @@
 package dev.henny.rocketload.fuel
 
 import com.google.gson.JsonParser
+import dev.henny.rocketload.client.ResourceFingerprints
 import dev.henny.rocketload.pack.ZipRootReader
 import org.junit.jupiter.api.Assertions.assertArrayEquals
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -108,6 +109,8 @@ class RocketFuelRoundTripTest {
             assertTrue(fuel.domains.visuals)
             assertFalse(fuel.domains.sounds)
             assertFalse(fuel.domains.opaque)
+            val fingerprint = ResourceFingerprints.PackFingerprint("ordinary", fuel.domains)
+            assertTrue(ResourceFingerprints.fingerprint(listOf(fingerprint)) { it.sounds }.isEmpty())
         }
     }
 
@@ -121,7 +124,14 @@ class RocketFuelRoundTripTest {
         )
         val overlayFuel = dir.resolve("overlay.rocketfuel")
         RocketFuelWriter.convert(overlay, overlayFuel)
-        RocketFuelFile.open(overlayFuel).use { assertTrue(it.domains.opaque) }
+        RocketFuelFile.open(overlayFuel).use {
+            assertTrue(it.domains.opaque)
+            assertFalse(it.domains.lang)
+            val before = listOf(ResourceFingerprints.PackFingerprint("overlay-v1", it.domains))
+            val after = listOf(ResourceFingerprints.PackFingerprint("overlay-v2", it.domains))
+            assertEquals(listOf("overlay-v1"), ResourceFingerprints.fingerprint(before) { domain -> domain.lang })
+            assertEquals(listOf("overlay-v2"), ResourceFingerprints.fingerprint(after) { domain -> domain.lang })
+        }
 
         val filtered = zip(
             mapOf(

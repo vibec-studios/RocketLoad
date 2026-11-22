@@ -53,7 +53,10 @@ object RocketLoadHooks {
         }
         val primary = RocketFuelPackResources(info, fuel)
         val overlays = metadata.overlays()
-        if (overlays.isEmpty()) return primary
+        if (overlays.isEmpty()) {
+            ResourceFingerprints.registerDownload(primary, source)
+            return primary
+        }
         val overlayPacks: List<PackResources> = overlays.map { overlay ->
             RocketFuelPackResources(info, fuel, overlay, releaseOnClose = false)
         }
@@ -63,6 +66,7 @@ object RocketLoadHooks {
         /*val result = CompositePackResources(primary, overlayPacks)
         *///?}
         ResourceFingerprints.register(result, fuel)
+        ResourceFingerprints.registerDownload(result, source)
         return result
     }
 }

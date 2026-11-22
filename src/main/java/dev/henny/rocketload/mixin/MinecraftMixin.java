@@ -5,6 +5,7 @@ import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import com.llamalad7.mixinextras.sugar.Local;
 import dev.henny.rocketload.client.BackgroundReloadDriver;
 import dev.henny.rocketload.client.ReloadDebug;
+import dev.henny.rocketload.client.ReloadSkips;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
@@ -81,6 +82,7 @@ public abstract class MinecraftMixin {
             List<PackResources> packs,
             Operation<ReloadInstance> original,
             @Local(argsOnly = true) boolean isRecovery) {
+        ReloadSkips.beginReload(packs);
         ReloadDebug.packs(packs);
         Executor apply = BackgroundReloadDriver.applyExecutor(mainThreadExecutor, isRecovery);
         return original.call(manager, backgroundExecutor, apply, initialTask, packs);

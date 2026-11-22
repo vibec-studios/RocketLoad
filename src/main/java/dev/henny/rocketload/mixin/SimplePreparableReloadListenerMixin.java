@@ -22,7 +22,7 @@ public abstract class SimplePreparableReloadListenerMixin {
             Executor reloadExecutor,
             CallbackInfoReturnable<CompletableFuture<Void>> cir) {
         if (ReloadSkips.shouldSkipSimpleListener(this, state.resourceManager())) {
-            cir.setReturnValue(CompletableFuture.completedFuture(Unit.INSTANCE).thenCompose(barrier::wait).thenAcceptAsync(unit -> {}, reloadExecutor));
+            cir.setReturnValue(barrier.wait(Unit.INSTANCE).thenAccept(unit -> {}));
         }
     }
 }
