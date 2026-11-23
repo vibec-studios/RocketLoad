@@ -10,6 +10,7 @@ class RocketLoadConfig {
     var backgroundReload: Boolean = true
     var applyBudgetMsPerTick: Int = 3
     var spreadAtlasUpload: Boolean = true
+    var preferDirectAtlasUpload: Boolean = true
     var toasts: Boolean = true
     var chunkRebuildGuard: Boolean = true
     var selectiveReload: Boolean = true

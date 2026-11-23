@@ -54,6 +54,11 @@ public final class AtlasPreUpload {
     }
 
     public static CompletableFuture<Job> prepare(SpriteLoader.Preparations preparations) {
+        if (RocketStartAtlas.direct()) {
+            // RocketStart writes the static sprites straight into the atlas when it is switched; scratch textures
+            // for them would only cost frames now and thousands of texture deletions then.
+            return CompletableFuture.completedFuture(new Job(new ArrayList<>(), preparations.mipLevel() + 1));
+        }
         List<TextureAtlasSprite> sprites = new ArrayList<>();
         for (TextureAtlasSprite sprite : preparations.regions().values()) {
             if (!sprite.contents().isAnimated()) {
