@@ -106,5 +106,6 @@ object ReloadDebug {
             wallMs, applyNanos.get() / 1_000_000, applyCount.get(), pumpFrames.get(), skipCount.get(), reloadCount.get(),
         )
         for (sample in top) log("  slow {} run={} ms queued={} ms", sample.name, sample.runMs, sample.queuedMs)
+        ReloadTimeline.log()
     }
 }

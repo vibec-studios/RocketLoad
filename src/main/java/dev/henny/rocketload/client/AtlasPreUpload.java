@@ -125,9 +125,12 @@ public final class AtlasPreUpload {
         }
     }
 
-    /** True while an atlas upload uses prepared scratch textures (queried by RocketStart's direct atlas upload). */
+    /**
+     * True while an atlas upload uses textures RocketLoad prepared (scratch textures or a filled hidden atlas); queried by
+     * RocketStart's direct atlas upload, which then steps back.
+     */
     public static boolean active() {
-        return !READY.isEmpty();
+        return !READY.isEmpty() || ShadowAtlas.claimed();
     }
 
     public static GpuTexture take(String name) {

@@ -26,7 +26,7 @@ Manuelle Reloads (F3+T, Pack-Screen, Server-Packs) zeigen keinen Mojang-Splash: 
 
 - Wird während eines laufenden Reloads ein weiterer angefordert (z. B. Server-Pack kommt rein), läuft danach **automatisch ein Folge-Reload** – nichts geht verloren
 - Beim Serverbeitritt startet der Pack-Reload früher und bekommt mehr Zeit pro Frame, solange noch keine Welt geladen ist. RocketLoad erkennt die betroffenen Bereiche verifizierter Server-Packs bereits im ZIP und erkennt denselben Inhalt später auch im `.rocketfuel`-Cache wieder.
-- Atlas-Uploads werden **vorab** über mehrere Frames auf die GPU geladen; das Umschalten auf die neuen Texturen passiert in einem einzigen Frame → kein Textur-Flackern
+- **Schatten-Atlas:** Sobald ein Atlas zusammengesetzt ist, zeichnet RocketLoad ihn über viele Frames in eine zweite, unsichtbare Textur – während die Modelle noch im Hintergrund gebacken werden. Vanilla würde erst danach alles in einem Rutsch hochladen. Am Ende wird nur noch die fertige Textur eingesetzt; das Umschalten passiert in einem einzigen Frame → kein Textur-Flackern, pixelgleich mit Vanilla (gleicher Blit-Shader)
 - Die Singleplayer-Welt pausiert während des Reloads – **nicht** bei LAN-Welten mit Mitspielern
 - Der Recovery-Pfad (kaputtes Pack → Rollback) behält bewusst das Vanilla-Verhalten
 
@@ -62,6 +62,7 @@ Nach dem Reload prüft RocketLoad, ob Block-Geometrie (`models/`, `blockstates/`
 | `applyBudgetMsPerTick` | `3` | Start-Budget für Apply-Arbeit pro Frame in ms (0 = Vanilla-Verhalten). Dauert ein Reload länger als 1,5 s, verdoppelt sich das Budget jede Sekunde bis 40 ms; ohne Fensterfokus gilt praktisch kein Limit |
 | `spreadAtlasUpload` | `true` | Atlas-Texturen über mehrere Frames vorab hochladen |
 | `preferDirectAtlasUpload` | `true` | Ist RocketStart installiert, schreibt dessen direkter Atlas-Upload die Sprites beim Umschalten in einem Rutsch; das Vorladen einzelner Scratch-Texturen entfällt |
+| `shadowAtlasUpload` | `true` | Neue Atlanten schon während des Model-Bakes in eine unsichtbare zweite Textur zeichnen und beim Umschalten nur noch einsetzen. Braucht kurzzeitig den Grafikspeicher eines zweiten Atlas; aus = Upload erst nach dem Bake |
 | `toasts` | `true` | Fortschritts-/Abschluss-Toasts |
 | `chunkRebuildGuard` | `true` | Chunk-Rebuild nur bei echter Änderung |
 | `selectiveReload` | `true` | Unveränderte Listener überspringen |

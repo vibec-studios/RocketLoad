@@ -4,6 +4,7 @@
   "package": "dev.henny.rocketload.mixin",
   "compatibilityLevel": "${java}",
   "client": [
+    "AbstractTextureAccessor",
     "AllChangedMixin",
     "AtlasManagerMixin",
     "CompositePackAccessor",
@@ -24,6 +25,7 @@
     "PendingStitchAccessor",
     "PendingStitchResultsMixin",
     "ShaderManagerMixin",
+    "SimpleReloadInstanceMixin",
     "SimplePreparableReloadListenerMixin",
     "TextureAtlasAccessor",
     "TextureAtlasMixin",

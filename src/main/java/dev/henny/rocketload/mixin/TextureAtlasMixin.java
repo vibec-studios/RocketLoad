@@ -3,6 +3,7 @@ package dev.henny.rocketload.mixin;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import dev.henny.rocketload.client.AtlasPreUpload;
+import dev.henny.rocketload.client.ShadowAtlas;
 import java.util.function.Supplier;
 import net.minecraft.client.renderer.texture.TextureAtlas;
 import net.minecraft.client.renderer.texture.TextureAtlasSprite;
@@ -15,13 +16,16 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import com.mojang.renderpearl.api.GpuFormat;
 import com.mojang.renderpearl.api.device.GpuDevice;
 import com.mojang.renderpearl.api.textures.GpuTexture;
+import com.mojang.renderpearl.api.textures.GpuTextureView;
 //?} else if >=26.2 {
 /*import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.systems.GpuDevice;
 import com.mojang.blaze3d.textures.GpuTexture;
+import com.mojang.blaze3d.textures.GpuTextureView;
 *///?} else {
 /*import com.mojang.blaze3d.systems.GpuDevice;
 import com.mojang.blaze3d.textures.GpuTexture;
+import com.mojang.blaze3d.textures.GpuTextureView;
 import com.mojang.blaze3d.textures.TextureFormat;
 *///?}
 
@@ -48,9 +52,52 @@ public abstract class TextureAtlasMixin {
     @Shadow
     private int maxMipLevel;
 
+    @Shadow
+    private int mipLevelCount;
+
+    @Shadow
+    private GpuTextureView[] mipViews;
+
+    @Shadow
+    private void uploadAnimationFrames() {
+    }
+
+    //? if >=26.2 {
+    @Shadow
+    protected abstract void releaseTextures();
+    //?}
+
     @Inject(method = "createTexture", at = @At("HEAD"), cancellable = true)
     private void rocketload$keepAtlasTexture(int newWidth, int newHeight, int newMipLevel, CallbackInfo ci) {
+        ShadowAtlas.Job shadow = ShadowAtlas.claim(newWidth, newHeight, newMipLevel);
+        if (shadow != null) {
+            // Same steps as vanilla's createTexture, with the texture RocketLoad already filled during the reload.
+            //? if >=26.2 {
+            this.releaseTextures();
+            //?} else {
+            /*((TextureAtlas) (Object) this).close();
+            *///?}
+            AbstractTextureAccessor texture = (AbstractTextureAccessor) this;
+            texture.rocketload_setTexture(shadow.texture());
+            texture.rocketload_setTextureView(shadow.view());
+            this.width = newWidth;
+            this.height = newHeight;
+            this.maxMipLevel = newMipLevel;
+            this.mipLevelCount = newMipLevel + 1;
+            this.mipViews = shadow.mipViews();
+            ci.cancel();
+            return;
+        }
         if (this.width > 0 && this.width == newWidth && this.height == newHeight && this.maxMipLevel == newMipLevel) {
+            ci.cancel();
+        }
+    }
+
+    @Inject(method = "uploadInitialContents", at = @At("HEAD"), cancellable = true)
+    private void rocketload$shadowHasStatics(CallbackInfo ci) {
+        if (ShadowAtlas.claimed()) {
+            // All static sprites are in the switched-in texture already; animated ones are drawn as usual.
+            this.uploadAnimationFrames();
             ci.cancel();
         }
     }
